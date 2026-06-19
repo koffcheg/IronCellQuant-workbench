@@ -1,0 +1,43 @@
+# Local microscopy inputs and generated outputs
+input/
+output/
+
+# Large image/data files should not be committed
+*.bmp
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+*.csv
+
+# Keep source/control CSV-like files only if explicitly force-added later
+!README.md
+
+# Python cache/build files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local editor / OS files
+.idea/
+.vscode/
+.vs/
+Thumbs.db
+Desktop.ini
+
+# Fiji/ImageJ local state or logs
+*.log
+fiji_stdout.txt
+fiji_stderr.txt
+runner_report.csv
+run_parameters.csv
+run_parameters.txt
+macro_log.txt
