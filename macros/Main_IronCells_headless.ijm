@@ -1,6 +1,6 @@
 // Main_IronCells_headless.ijm
-// Головний Fiji/ImageJ headless macro для попереднього відносного показника iron-staining.
-// Python runner тільки запускає Fiji, передає параметри, перевіряє outputs і збирає звіти.
+// Fiji/ImageJ headless MVP for preliminary relative iron-staining quantification.
+// Python only launches Fiji, passes parameters, validates outputs, and stores run metadata.
 
 requires("1.53");
 
@@ -10,71 +10,62 @@ outputDir = getArgString(arg, "output", "");
 if (inputPath == "") exit("Missing input=...");
 if (outputDir == "") exit("Missing output=...");
 
-// Метадані шляху потрібні для звітів.
-// Fiji отримує short path для стабільності, але CSV має зберігати зрозумілий original long path.
 originalLongPath = getArgString(arg, "original_long_path", inputPath);
 originalFileName = getArgString(arg, "original_file_name", "");
 groupName = getArgString(arg, "group_name", "unknown");
 shortPathUsed = getArgString(arg, "short_path_used", "");
 
-// Усі параметри нижче приходять через macro argument string.
-// Це дозволяє робити sweep без ручного редагування macro між експериментами.
-// Блок segmentation відповідає тільки за побудову binary mask клітинного матеріалу.
-thresholdMethod = getArgString(arg, "threshold_method", "Otsu");
+thresholdMethod = getArgString(arg, "threshold_method", "Li");
 thresholdMode = getArgString(arg, "threshold_mode", "dark");
 backgroundRolling = parseFloat(getArgString(arg, "background_rolling", "80"));
 medianRadius = parseFloat(getArgString(arg, "median_radius", "2"));
 contrastSaturated = parseFloat(getArgString(arg, "contrast_saturated", "0.35"));
 morphOpenIterations = parseFloat(getArgString(arg, "morph_open_iterations", "0"));
 morphCloseIterations = parseFloat(getArgString(arg, "morph_close_iterations", "1"));
-fillHoles = getArgBool(arg, "fill_holes", false);
-metadataBarHeight = parseFloat(getArgString(arg, "metadata_bar_height", "180"));
+fillHoles = getArgBool(arg, "fill_holes", 1);
+metadataBarHeight = parseFloat(getArgString(arg, "metadata_bar_height", "120"));
 
-// Блок extraction/classification навмисно розділений.
-// Analyze Particles може витягнути дрібні компоненти для діагностики, а аналітична класифікація
-// потім вирішує, що є noise, fragment, single-cell candidate або aggregate candidate.
 particleExtractMinArea = parseFloat(getArgString(arg, "particle_extract_min_area", "10"));
 particleExtractMaxArea = parseFloat(getArgString(arg, "particle_extract_max_area", "2000000"));
 minNoiseArea = parseFloat(getArgString(arg, "min_noise_area", "10"));
-minSingleCellArea = parseFloat(getArgString(arg, "min_single_cell_area", "80"));
+minSingleCellArea = parseFloat(getArgString(arg, "min_single_cell_area", "40"));
 maxSingleCellArea = parseFloat(getArgString(arg, "max_single_cell_area", "50000"));
 minAggregateArea = parseFloat(getArgString(arg, "min_aggregate_area", "50000"));
 maxAggregateArea = parseFloat(getArgString(arg, "max_aggregate_area", "2000000"));
 maxSingleCellAspect = parseFloat(getArgString(arg, "max_single_cell_aspect", "10"));
 maxAggregateAspect = parseFloat(getArgString(arg, "max_aggregate_aspect", "30"));
-excludeBorderObjects = getArgBool(arg, "exclude_border_objects", true);
+excludeBorderObjects = getArgBool(arg, "exclude_border_objects", 1);
 borderMarginPx = parseFloat(getArgString(arg, "border_margin_px", "2"));
 
-// Blue-pixel rule рахується по оригінальному RGB, не по grayscale preprocessing.
-// Це дає preliminary relative iron-staining feature, а не абсолютну концентрацію заліза.
 blueMin = parseFloat(getArgString(arg, "blue_min", "120"));
 blueOverRed = parseFloat(getArgString(arg, "blue_over_red", "20"));
 blueOverGreen = parseFloat(getArgString(arg, "blue_over_green", "10"));
 
-// У нормальному режимі зображення зберігається тільки одне: final_analysis_overlay.tif.
-// CSV та macro_log несуть діагностику; проміжні маски не пишемо, щоб не витрачати I/O на 4000x3000 кадрах.
-saveOverlays = getArgBool(arg, "save_overlays", true);
-labelObjects = getArgBool(arg, "label_objects", true);
+saveOverlays = getArgBool(arg, "save_overlays", 1);
+labelObjects = getArgBool(arg, "label_objects", 1);
+drawRejectedObjects = getArgBool(arg, "draw_rejected_objects", 0);
 contourWidth = parseFloat(getArgString(arg, "contour_width", "6"));
-makeSegmentationSweep = getArgBool(arg, "make_segmentation_sweep", false);
+previewMaxSize = parseFloat(getArgString(arg, "final_overlay_preview_max_size", "1600"));
+minExpectedAcceptedObjects = parseFloat(getArgString(arg, "min_expected_accepted_objects", "1"));
+minStableAcceptedObjects = parseFloat(getArgString(arg, "min_stable_accepted_objects", "3"));
+minStableAcceptedPixels = parseFloat(getArgString(arg, "min_stable_accepted_pixels", "500"));
 
 File.makeDirectory(outputDir);
 logPath = outputDir + "/macro_log.txt";
 File.saveString("IronCells Fiji headless macro\n", logPath);
+checkpoint("start");
 logLine("Input(short/Fiji): " + inputPath);
 logLine("Input(original): " + originalLongPath);
 logLine("Output: " + outputDir);
 logLine("Group: " + groupName);
-logLine("Blue pixels are counted from original RGB-derived blue mask inside reconstructed object ROI.");
-logLine("ROI membership is checked with selectionContains(x,y); bbox is only a loop limit.");
-logLine("Run parameters are saved by the Python runner in run_parameters.txt and run_parameters.csv.");
-logLine("Only final_analysis_overlay.tif is saved as image output in the normal path.");
+logLine("Feature definition: blue_pixel_fraction = blue_pixels / object_pixels. This is not absolute iron concentration.");
 
-// Batch mode зменшує GUI overhead у headless запуску.
-// Results очищаються на старті, щоб старі таблиці ImageJ не змішалися з поточним кадром.
 setBatchMode(true);
 run("Clear Results");
+
+checkpoint("before_open_input");
 open(inputPath);
+checkpoint("after_open_input");
 originalTitle = getTitle();
 if (originalFileName == "") originalFileName = originalTitle;
 width = getWidth();
@@ -82,15 +73,12 @@ height = getHeight();
 framePixels = width * height;
 logLine("Opened image: " + originalTitle + " width=" + width + " height=" + height + " bitDepth=" + bitDepth());
 
-// Відкритий кадр стає робочим Original_RGB без додаткового full-frame duplicate.
-// Це економить пам'ять: великий RGB кадр 4000x3000 не копіюється зайвий раз.
 selectWindow(originalTitle);
 rename("Original_RGB");
 originalTitle = "Original_RGB";
-logLine("prepared_original_rgb_window");
+checkpoint("prepared_original_rgb_window");
 
-// Канали RGB розділяються з оригінального зображення.
-// Blue-pixel feature не рахується з grayscale або preprocess copy.
+checkpoint("before_split_rgb_channels");
 selectWindow("Original_RGB");
 run("Duplicate...", "title=RGB_For_Channels");
 run("Split Channels");
@@ -98,71 +86,72 @@ titles = getList("image.titles");
 redTitle = ""; greenTitle = ""; blueTitle = "";
 for (ti = 0; ti < titles.length; ti++) {
     t = titles[ti];
-    if (startsWith(t, "C1-") || indexOf(t, "red") >= 0 || indexOf(t, "Red") >= 0) redTitle = t;
-    if (startsWith(t, "C2-") || indexOf(t, "green") >= 0 || indexOf(t, "Green") >= 0) greenTitle = t;
-    if (startsWith(t, "C3-") || indexOf(t, "blue") >= 0 || indexOf(t, "Blue") >= 0) blueTitle = t;
+    if (startsWith(t, "C1-")) redTitle = t;
+    if (redTitle == "") {
+        if (indexOf(t, "red") >= 0) redTitle = t;
+        if (indexOf(t, "Red") >= 0) redTitle = t;
+    }
+    if (startsWith(t, "C2-")) greenTitle = t;
+    if (greenTitle == "") {
+        if (indexOf(t, "green") >= 0) greenTitle = t;
+        if (indexOf(t, "Green") >= 0) greenTitle = t;
+    }
+    if (startsWith(t, "C3-")) blueTitle = t;
+    if (blueTitle == "") {
+        if (indexOf(t, "blue") >= 0) blueTitle = t;
+        if (indexOf(t, "Blue") >= 0) blueTitle = t;
+    }
 }
-if (redTitle == "" && titles.length >= 3) redTitle = titles[titles.length - 3];
-if (greenTitle == "" && titles.length >= 2) greenTitle = titles[titles.length - 2];
-if (blueTitle == "" && titles.length >= 1) blueTitle = titles[titles.length - 1];
+if (redTitle == "") {
+    if (titles.length >= 3) redTitle = titles[titles.length - 3];
+}
+if (greenTitle == "") {
+    if (titles.length >= 2) greenTitle = titles[titles.length - 2];
+}
+if (blueTitle == "") {
+    if (titles.length >= 1) blueTitle = titles[titles.length - 1];
+}
 selectWindow(redTitle); rename("Red_Channel"); redTitle = "Red_Channel";
 selectWindow(greenTitle); rename("Green_Channel"); greenTitle = "Green_Channel";
 selectWindow(blueTitle); rename("Blue_Channel"); blueTitle = "Blue_Channel";
+checkpoint("after_split_rgb_channels");
 
-// Grayscale pipeline використовується тільки для пошуку cell-material mask.
-// Ці операції можна тюнити через runner/sweep, не змінюючи macro code.
-// Після threshold цей самий window перетворюється на binary mask in-place, щоб не робити зайві копії.
+checkpoint("before_prepare_segmentation_gray");
 selectWindow("Original_RGB");
 run("Duplicate...", "title=Segmentation_Gray");
 run("8-bit");
-if (backgroundRolling > 0) {
-    run("Subtract Background...", "rolling=" + backgroundRolling);
-}
-if (medianRadius > 0) {
-    run("Median...", "radius=" + medianRadius);
-}
-if (contrastSaturated >= 0) {
-    run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
-}
-logLine("Prepared segmentation grayscale image");
+if (backgroundRolling > 0) run("Subtract Background...", "rolling=" + backgroundRolling);
+if (medianRadius > 0) run("Median...", "radius=" + medianRadius);
+if (contrastSaturated >= 0) run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
+checkpoint("after_prepare_segmentation_gray");
 
 selectWindow("Segmentation_Gray");
-logLine("before_set_auto_threshold");
+checkpoint("before_set_auto_threshold");
 setAutoThreshold(thresholdMethod + " " + thresholdMode);
-logLine("after_set_auto_threshold");
+checkpoint("after_set_auto_threshold");
 run("Convert to Mask");
-logLine("after_convert_segmentation_to_mask");
+checkpoint("after_convert_segmentation_to_mask");
 cellMaskTitle = "Segmentation_Gray";
-// Metadata bar не заливаємо фізично в binary mask: на великих кадрах Fiji headless може зависати
-// на операціях Clear/Fill по великому selection. Замість цього нижня зона відсікається логічно:
-// objectTouchesBorder() класифікує такі компоненти як border_object.
-whiteAfterThreshold = -1;
-logLine("skip_white_count_after_threshold=true");
 
 selectWindow(cellMaskTitle);
 if (morphOpenIterations > 0) {
-    logLine("before_morph_open");
+    checkpoint("before_morph_open");
     run("Options...", "iterations=" + morphOpenIterations + " count=1 black do=Open");
-    logLine("after_morph_open");
+    checkpoint("after_morph_open");
 }
 if (morphCloseIterations > 0) {
-    logLine("before_morph_close");
+    checkpoint("before_morph_close");
     run("Options...", "iterations=" + morphCloseIterations + " count=1 black do=Close");
-    logLine("after_morph_close");
+    checkpoint("after_morph_close");
 }
-if (fillHoles) {
-    logLine("before_fill_holes");
+if (fillHoles == 1) {
+    checkpoint("before_fill_holes");
     run("Fill Holes");
-    logLine("after_fill_holes");
+    checkpoint("after_fill_holes");
 }
-whiteAfterMorphology = -1;
-logLine("white_pixels_mask_after_threshold=" + whiteAfterThreshold);
-logLine("white_pixels_mask_after_morphology=" + whiteAfterMorphology);
+checkpoint("after_morphology_block");
 
-// Blue mask будується з оригінальних RGB каналів.
-// Потім вона перетинається з cleaned cell-material mask, але per-object count нижче
-// додатково перевіряє membership у конкретному ROI.
-// Тут створюється загальна blue mask у пам'яті; на диск її не пишемо.
+checkpoint("before_blue_mask_creation");
 selectWindow(blueTitle);
 run("Duplicate...", "title=Blue_Min_Mask");
 setThreshold(blueMin + 1, 255);
@@ -181,21 +170,18 @@ imageCalculator("AND create", "Blue_Tmp_1", "Blue_Minus_G");
 rename("Blue_Candidate_Mask");
 imageCalculator("AND create", "Blue_Candidate_Mask", cellMaskTitle);
 rename("Blue_Pixels_Mask");
-totalBluePixelsInMask = -1;
-logLine("total_blue_pixels_in_cleaned_mask=" + totalBluePixelsInMask);
+totalBluePixelsInMask = whiteCount("Blue_Pixels_Mask");
+checkpoint("after_blue_mask_creation total_blue_pixels_in_cleaned_mask=" + totalBluePixelsInMask);
 
+checkpoint("before_analyze_particles");
 selectWindow(cellMaskTitle);
 run("Clear Results");
 run("Set Measurements...", "area centroid bounding fit shape mean redirect=None decimal=3");
-logLine("before_analyze_particles_display_all_components");
-// Extract threshold = 1..max навмисно збирає всі компоненти для діагностики.
-// particleExtractMinArea застосовується в класифікації, щоб не втратити дрібні компоненти в CSV.
 run("Analyze Particles...", "size=1-" + particleExtractMaxArea + " circularity=0.00-1.00 display clear");
 nObjects = nResults;
-logLine("after_analyze_particles_display_all_components component_count=" + nObjects);
+checkpoint("after_analyze_particles component_count=" + nObjects);
 
-// Копіюємо Results table у масиви одразу після Analyze Particles.
-// Далі macro може вільно перемикати image windows, не залежачи від активної таблиці.
+checkpoint("before_results_table_read");
 areas = newArray(nObjects); xs = newArray(nObjects); ys = newArray(nObjects);
 bxs = newArray(nObjects); bys = newArray(nObjects); bws = newArray(nObjects); bhs = newArray(nObjects);
 for (i = 0; i < nObjects; i++) {
@@ -207,13 +193,11 @@ for (i = 0; i < nObjects; i++) {
     bws[i] = getResult("Width", i);
     bhs[i] = getResult("Height", i);
 }
+checkpoint("after_results_table_read");
 
-// Після Analyze Particles сума Area всіх компонентів є стабільною оцінкою площі cleaned mask.
-// Це замінює ранній whiteCount() по всьому 12MP mask, який у Fiji headless може бути дуже повільним.
 whiteAfterMorphology = 0;
-for (i = 0; i < nObjects; i++) {
-    whiteAfterMorphology += areas[i];
-}
+for (i = 0; i < nObjects; i++) whiteAfterMorphology += areas[i];
+if (whiteAfterMorphology > 0) maskBlueFraction = totalBluePixelsInMask / whiteAfterMorphology; else maskBlueFraction = 0;
 
 componentsGe1 = 0; componentsGe5 = 0; componentsGe10 = 0; componentsGe20 = 0;
 componentsGe50 = 0; componentsGe100 = 0; componentsGe200 = 0; componentsGe500 = 0;
@@ -221,26 +205,24 @@ singleCount = 0; aggregateCount = 0; tooSmallCount = 0; smallFragmentCount = 0;
 tooLargeCount = 0; tooLongCount = 0; borderCount = 0; roiWarningCount = 0; acceptedCount = 0;
 totalAcceptedObjectPixels = 0; totalAcceptedBluePixels = 0;
 
-// all_components_before_filter.csv потрібен для tuning: він показує всі компоненти до фінального відсіву.
-// per_object_features.csv містить тільки object-level measurements і ROI reconstruction статус.
 allCsv = outputDir + "/all_components_before_filter.csv";
 File.saveString("component_id,area_px,centroid_x,centroid_y,bbox_x,bbox_y,bbox_width,bbox_height,aspect_ratio,touches_border,classification,accepted_for_summary,reject_reason\n", allCsv);
-perObjectCsv = outputDir + "/per_object_features.csv";
-File.saveString("image_name,group_name,original_long_path,short_path_used,object_id,classification,accepted_for_summary,reject_reason,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,area_px,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,touches_border,mean_R,mean_G,mean_B,roi_area_from_particles,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n", perObjectCsv);
+rejectedCsv = outputDir + "/rejected_objects.csv";
+File.saveString("image_name,group_name,object_id,classification,reject_reason,area_px,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,touches_border,roi_reconstruction_status\n", rejectedCsv);
+objectCsv = outputDir + "/final_object_report.csv";
+File.saveString("image_name,group_name,original_long_path,short_path_used,object_id,object_type,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,area_px,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,mean_R,mean_G,mean_B,roi_area_from_particles,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n", objectCsv);
+blueCsv = outputDir + "/blue_pixels_features.csv";
+File.saveString("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", blueCsv);
 
-// Overlay_Combined — єдиний image output.
-// Accepted_Objects_Mask — службова in-memory mask, через яку blue pixels обмежуються accepted ROI.
-if (saveOverlays) {
-    selectWindow("Original_RGB"); run("Duplicate...", "title=Overlay_Combined");
+if (saveOverlays == 1) {
+    checkpoint("before_overlay_setup");
+    selectWindow("Original_RGB");
+    run("Duplicate...", "title=Overlay_Combined");
     newImage("Accepted_Objects_Mask", "8-bit black", width, height, 1);
+    checkpoint("after_overlay_setup");
 }
 
-// Основний object loop:
-// 1) класифікує компонент;
-// 2) відновлює ROI;
-// 3) перевіряє площу ROI;
-// 4) рахує blue pixels тільки всередині ROI;
-// 5) пише CSV та малює контури на фінальному overlay.
+checkpoint("before_per_object_loop");
 for (i = 0; i < nObjects; i++) {
     area = areas[i];
     aspect = maxOf(bws[i], bhs[i]) / maxOf(1, minOf(bws[i], bhs[i]));
@@ -264,22 +246,17 @@ for (i = 0; i < nObjects; i++) {
     if (classification == "too_large_artifact") tooLargeCount++;
     if (classification == "too_long_artifact") tooLongCount++;
     if (classification == "border_object") borderCount++;
-    if (accepted) acceptedCount++;
 
-    // Цей рядок пишеться для кожного компонента, включно з rejected noise.
-    // Так можна бачити, які пороги відсікають об'єкти і чи не завеликий background capture.
     File.append((i+1) + "," + d2s(area,0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "\n", allCsv);
 
     roiStatus = "not_attempted"; roiArea = 0; roiDelta = 100; meanR = 0; meanG = 0; meanB = 0; objectPixels = 0; bluePixels = 0;
-    // doWand відновлює ROI компонента на binary mask.
-    // Після цього площа ROI порівнюється з Area з Analyze Particles.
     selectWindow(cellMaskTitle);
     recoverObjectRoi(xs[i], ys[i], bxs[i], bys[i], bws[i], bhs[i]);
     if (selectionType() == -1) {
         roiStatus = "failed_no_selection";
         roiWarningCount++;
-        accepted = false;
-        if (classification == "single_cell_candidate" || classification == "aggregate_candidate") classification = "roi_reconstruction_warning";
+        accepted = 0;
+        if (isAcceptedClass(classification) == 1) classification = "roi_reconstruction_warning";
         rejectReason = "roi_reconstruction_failed";
         logLine("WARNING object_id=" + (i+1) + " doWand ROI reconstruction failed");
     } else {
@@ -288,48 +265,58 @@ for (i = 0; i < nObjects; i++) {
         if (roiDelta > 10) {
             roiStatus = "warning_area_delta_gt_10pct";
             roiWarningCount++;
-            accepted = false;
-            if (classification == "single_cell_candidate" || classification == "aggregate_candidate") classification = "roi_reconstruction_warning";
+            accepted = 0;
+            if (isAcceptedClass(classification) == 1) classification = "roi_reconstruction_warning";
             rejectReason = "roi_area_delta_gt_10pct";
-            logLine("WARNING object_id=" + (i+1) + " roi_area_from_particles=" + area + " roi_area_reconstructed=" + roiArea + " delta_percent=" + d2s(roiDelta,2));
         } else {
             roiStatus = "ok";
         }
         selectWindow(redTitle); run("Restore Selection"); getStatistics(areaR, meanR);
         selectWindow(greenTitle); run("Restore Selection"); getStatistics(areaG, meanG);
         selectWindow(blueTitle); run("Restore Selection"); getStatistics(areaB, meanB);
-        // bbox потрібен тільки як межа циклу для швидкості.
-        // selectionContains(xx, yy) гарантує, що blue pixels рахуються всередині ROI, а не в прямокутнику bbox.
         selectWindow("Blue_Pixels_Mask"); run("Restore Selection");
         counts = countRoiPixelsInBbox(bxs[i], bys[i], bws[i], bhs[i]);
         objectPixels = counts[0];
         bluePixels = counts[1];
     }
 
-    // Summary totals включають тільки accepted object classes.
-    // Noise, border objects, ROI warnings та artifacts лишаються в CSV, але не входять в підсумковий feature.
-    if (accepted) {
-        totalAcceptedObjectPixels += objectPixels;
-        totalAcceptedBluePixels += bluePixels;
-        if (saveOverlays && selectionType() != -1) {
-            // Accepted_Objects_Mask потрібна, щоб blue overlay був тільки всередині прийнятих ROI.
-            selectWindow("Accepted_Objects_Mask");
-            run("Restore Selection");
-            setForegroundColor(255, 255, 255);
-            run("Fill", "slice");
-        }
-    }
     if (objectPixels > 0) fraction = bluePixels / objectPixels; else fraction = 0;
 
-    // Object CSV зберігає і класифікацію, і ROI reconstruction diagnostics.
-    // Якщо doWand дав ROI з площею, що відрізняється >10%, об'єкт позначається warning і не приймається.
-    File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + (i+1) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus + "\n", perObjectCsv);
+    if (accepted == 1) {
+        acceptedCount++;
+        totalAcceptedObjectPixels += objectPixels;
+        totalAcceptedBluePixels += bluePixels;
+        objectType = classification;
+        File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + (i+1) + "," + objectType + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus + "\n", objectCsv);
+        File.append(originalFileName + "," + groupName + "," + objectType + "," + (i+1) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "\n", blueCsv);
+        if (saveOverlays == 1) {
+            if (selectionType() != -1) {
+                selectWindow("Accepted_Objects_Mask");
+                run("Restore Selection");
+                setForegroundColor(255,255,255);
+                run("Fill", "slice");
+            }
+        }
+    } else {
+        File.append(originalFileName + "," + groupName + "," + (i+1) + "," + classification + "," + rejectReason + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + roiStatus + "\n", rejectedCsv);
+    }
 
-    if (saveOverlays && selectionType() != -1) drawObjectOverlays(i+1, classification, area, accepted, bxs[i], bys[i]);
+    if (saveOverlays == 1) {
+        if (selectionType() != -1) {
+            shouldDrawObject = accepted;
+            if (drawRejectedObjects == 1) shouldDrawObject = 1;
+            if (shouldDrawObject == 1) drawObjectOverlay(i+1, classification, area, accepted, fraction, bxs[i], bys[i]);
+        }
+    }
 }
+checkpoint("after_per_object_loop");
 
-if (saveOverlays) {
-    // Синій шар: blue-rule pixels тільки всередині accepted object ROI, не в bbox і не в rejected noise.
+if (totalAcceptedObjectPixels > 0) acceptedFraction = totalAcceptedBluePixels / totalAcceptedObjectPixels; else acceptedFraction = 0;
+File.append(originalFileName + "," + groupName + ",all_accepted_cell_material,frame," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "\n", blueCsv);
+File.append(originalFileName + "," + groupName + ",all_cleaned_cell_material,frame," + d2s(whiteAfterMorphology,0) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "\n", blueCsv);
+
+if (saveOverlays == 1) {
+    checkpoint("before_final_overlay_blue_layer");
     imageCalculator("AND create", "Blue_Pixels_Mask", "Accepted_Objects_Mask");
     rename("Blue_Accepted_Mask");
     selectWindow("Blue_Accepted_Mask");
@@ -341,31 +328,39 @@ if (saveOverlays) {
         run("Fill", "slice");
         run("Select None");
     }
+    // Create the lightweight preview before saveAs(Tiff).
+    // In Fiji headless, saveAs can retitle the active image to the saved filename,
+    // so selecting the old window title after saveAs is not reliable.
+    checkpoint("before_save_final_overlay_preview");
+    selectWindow("Overlay_Combined");
+    savePreviewImage();
+    checkpoint("after_save_final_overlay_preview");
 
+    checkpoint("before_save_final_overlay");
     selectWindow("Overlay_Combined");
     saveAs("Tiff", outputDir + "/final_analysis_overlay.tif");
-    rename("Overlay_Combined");
+    checkpoint("after_save_final_overlay");
 }
 
-// Image-level summary пишеться після object loop.
-// Тут є і площа всієї cleaned mask, і підсумки тільки accepted об'єктів.
-if (totalAcceptedObjectPixels > 0) acceptedFraction = totalAcceptedBluePixels / totalAcceptedObjectPixels; else acceptedFraction = 0;
-if (whiteAfterMorphology > 0 && totalBluePixelsInMask >= 0) maskBlueFraction = totalBluePixelsInMask / whiteAfterMorphology; else maskBlueFraction = 0;
-summaryCsv = outputDir + "/per_image_summary.csv";
-File.saveString("image_name,group_name,original_long_path,short_path_used,image_width,image_height,threshold_method,threshold_mode,background_rolling,median_radius,contrast_saturated,morph_open_iterations,morph_close_iterations,fill_holes,metadata_bar_height,particle_extract_min_area,particle_extract_max_area,min_noise_area,min_single_cell_area,max_single_cell_area,min_aggregate_area,max_aggregate_area,max_single_cell_aspect,max_aggregate_aspect,exclude_border_objects,border_margin_px,blue_min,blue_over_red,blue_over_green,total_cell_material_pixels,cell_material_area_fraction,total_blue_pixels_in_cell_material,blue_pixel_fraction_all_cell_material,blue_pixel_percent_all_cell_material,component_count_total,accepted_object_count,single_cell_candidate_count,aggregate_candidate_count,too_small_noise_count,small_cell_or_fragment_count,too_large_artifact_count,too_long_artifact_count,border_object_count,roi_reconstruction_warning_count,accepted_object_pixels,accepted_blue_pixels,blue_pixel_fraction_all_accepted,blue_pixel_percent_all_accepted,components_area_ge_1,components_area_ge_5,components_area_ge_10,components_area_ge_20,components_area_ge_50,components_area_ge_100,components_area_ge_200,components_area_ge_500\n", summaryCsv);
-summaryLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + width + "," + height + "," + thresholdMethod + "," + thresholdMode + "," + backgroundRolling + "," + medianRadius + "," + contrastSaturated + "," + morphOpenIterations + "," + morphCloseIterations + "," + boolText(fillHoles) + "," + metadataBarHeight + "," + particleExtractMinArea + "," + particleExtractMaxArea + "," + minNoiseArea + "," + minSingleCellArea + "," + maxSingleCellArea + "," + minAggregateArea + "," + maxAggregateArea + "," + maxSingleCellAspect + "," + maxAggregateAspect + "," + boolText(excludeBorderObjects) + "," + borderMarginPx + "," + blueMin + "," + blueOverRed + "," + blueOverGreen + "," + d2s(whiteAfterMorphology,0) + "," + d2s(whiteAfterMorphology/framePixels,8) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "," + nObjects + "," + acceptedCount + "," + singleCount + "," + aggregateCount + "," + tooSmallCount + "," + smallFragmentCount + "," + tooLargeCount + "," + tooLongCount + "," + borderCount + "," + roiWarningCount + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + componentsGe1 + "," + componentsGe5 + "," + componentsGe10 + "," + componentsGe20 + "," + componentsGe50 + "," + componentsGe100 + "," + componentsGe200 + "," + componentsGe500 + "\n";
+lowAcceptedAreaWarning = 0;
+if (acceptedCount < minStableAcceptedObjects) lowAcceptedAreaWarning = 1;
+if (totalAcceptedObjectPixels < minStableAcceptedPixels) lowAcceptedAreaWarning = 1;
+
+qcStatus = "PASS";
+if (acceptedCount < minExpectedAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_OBJECT_COUNT");
+if (roiWarningCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_ROI_RECONSTRUCTION");
+if (lowAcceptedAreaWarning == 1) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_AREA");
+
+summaryCsv = outputDir + "/final_frame_summary.csv";
+File.saveString("image_name,group_name,original_long_path,short_path_used,image_width,image_height,threshold_method,threshold_mode,background_rolling,median_radius,contrast_saturated,morph_open_iterations,morph_close_iterations,fill_holes,metadata_bar_height,particle_extract_min_area,particle_extract_max_area,min_noise_area,min_single_cell_area,max_single_cell_area,min_aggregate_area,max_aggregate_area,max_single_cell_aspect,max_aggregate_aspect,exclude_border_objects,border_margin_px,blue_min,blue_over_red,blue_over_green,min_stable_accepted_objects,min_stable_accepted_pixels,total_cell_material_pixels,cell_material_area_fraction,total_blue_pixels_in_cell_material,blue_pixel_fraction_all_cell_material,blue_pixel_percent_all_cell_material,component_count_total,accepted_object_count,single_cell_candidate_count,aggregate_candidate_count,too_small_noise_count,small_cell_or_fragment_count,too_large_artifact_count,too_long_artifact_count,border_object_count,roi_reconstruction_warning_count,accepted_object_pixels,accepted_blue_pixels,blue_pixel_fraction_all_accepted,blue_pixel_percent_all_accepted,components_area_ge_1,components_area_ge_5,components_area_ge_10,components_area_ge_20,components_area_ge_50,components_area_ge_100,components_area_ge_200,components_area_ge_500,qc_status\n", summaryCsv);
+summaryLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + width + "," + height + "," + thresholdMethod + "," + thresholdMode + "," + backgroundRolling + "," + medianRadius + "," + contrastSaturated + "," + morphOpenIterations + "," + morphCloseIterations + "," + boolText(fillHoles) + "," + metadataBarHeight + "," + particleExtractMinArea + "," + particleExtractMaxArea + "," + minNoiseArea + "," + minSingleCellArea + "," + maxSingleCellArea + "," + minAggregateArea + "," + maxAggregateArea + "," + maxSingleCellAspect + "," + maxAggregateAspect + "," + boolText(excludeBorderObjects) + "," + borderMarginPx + "," + blueMin + "," + blueOverRed + "," + blueOverGreen + "," + minStableAcceptedObjects + "," + minStableAcceptedPixels + "," + d2s(whiteAfterMorphology,0) + "," + d2s(whiteAfterMorphology/framePixels,8) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "," + nObjects + "," + acceptedCount + "," + singleCount + "," + aggregateCount + "," + tooSmallCount + "," + smallFragmentCount + "," + tooLargeCount + "," + tooLongCount + "," + borderCount + "," + roiWarningCount + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + componentsGe1 + "," + componentsGe5 + "," + componentsGe10 + "," + componentsGe20 + "," + componentsGe50 + "," + componentsGe100 + "," + componentsGe200 + "," + componentsGe500 + "," + qcStatus + "\n";
 File.append(summaryLine, summaryCsv);
 
+writeQcReport(qcStatus);
+checkpoint("after_write_summary_and_qc");
 logLine("component_count_total=" + nObjects);
 logLine("accepted_object_count=" + acceptedCount);
-logLine("single_cell_candidate_count=" + singleCount);
-logLine("aggregate_candidate_count=" + aggregateCount);
-logLine("too_small_noise_count=" + tooSmallCount);
-logLine("small_cell_or_fragment_count=" + smallFragmentCount);
-logLine("border_object_count=" + borderCount);
 logLine("roi_reconstruction_warning_count=" + roiWarningCount);
-logLine("total_cell_material_pixels=" + whiteAfterMorphology);
-logLine("accepted_object_pixels=" + totalAcceptedObjectPixels);
 logLine("blue_pixel_percent_all_accepted=" + d2s(100*acceptedFraction,4));
 logLine("Finished successfully.");
 
@@ -374,14 +369,12 @@ run("Close All");
 eval("script", "java.lang.System.exit(0);");
 
 function recoverObjectRoi(cx, cy, bx, by, bw, bh) {
-    // Спочатку пробуємо centroid з Analyze Particles.
-    // Якщо centroid потрапив у дірку або межу, шукаємо перший білий pixel у bbox як fallback.
     selectWindow(cellMaskTitle);
     run("Select None");
     doWand(round(cx), round(cy));
     if (selectionType() != -1) return;
-    x0 = maxOf(0, floor(bx)); y0 = maxOf(0, floor(by));
-    x1 = minOf(width-1, ceil(bx+bw)); y1 = minOf(height-1, ceil(by+bh));
+    x0 = clampFloor(bx, 0, width - 1); y0 = clampFloor(by, 0, height - 1);
+    x1 = clampCeil(bx + bw, 0, width - 1); y1 = clampCeil(by + bh, 0, height - 1);
     for (yy = y0; yy <= y1; yy++) {
         for (xx = x0; xx <= x1; xx++) {
             if (getPixel(xx, yy) == 255) {
@@ -393,11 +386,9 @@ function recoverObjectRoi(cx, cy, bx, by, bw, bh) {
 }
 
 function countRoiPixelsInBbox(bx, by, bw, bh) {
-    // Важливо: bbox не є областю вимірювання.
-    // Він лише обмежує цикл, а selectionContains перевіряє реальну ROI membership.
     objectCount = 0; blueCount = 0;
-    x0 = maxOf(0, floor(bx)); y0 = maxOf(0, floor(by));
-    x1 = minOf(width-1, ceil(bx+bw)); y1 = minOf(height-1, ceil(by+bh));
+    x0 = clampFloor(bx, 0, width - 1); y0 = clampFloor(by, 0, height - 1);
+    x1 = clampCeil(bx + bw, 0, width - 1); y1 = clampCeil(by + bh, 0, height - 1);
     for (yy = y0; yy <= y1; yy++) {
         for (xx = x0; xx <= x1; xx++) {
             if (selectionContains(xx, yy)) {
@@ -409,19 +400,22 @@ function countRoiPixelsInBbox(bx, by, bw, bh) {
     return newArray(objectCount, blueCount);
 }
 
-function drawObjectOverlays(id, classification, area, accepted, bx, by) {
-    if (accepted) { rr=0; gg=255; bb=0; } else { rr=255; gg=120; bb=0; }
+function drawObjectOverlay(id, classification, area, accepted, fraction, bx, by) {
+    if (accepted == 1) { rr=0; gg=255; bb=0; } else { rr=255; gg=120; bb=0; }
     selectWindow("Overlay_Combined");
     run("Restore Selection");
     setLineWidth(contourWidth); setForegroundColor(rr,gg,bb); run("Draw", "slice");
-    if (labelObjects) { setFont("SansSerif", 18, "bold"); drawString("#" + id + " " + d2s(area,0) + " " + classification, bx, maxOf(20, by-6)); }
+    if (labelObjects == 1) {
+        setFont("SansSerif", 18, "bold");
+        drawString("#" + id + " " + classification + " blue=" + d2s(100*fraction,2) + "%", bx, maxOf(20, by-6));
+    }
     run("Select None");
 }
 
 function classifyObject(area, aspect, touchesBorder) {
-    // Класифікація відділена від extraction threshold.
-    // Маленькі компоненти лишаються в all_components_before_filter.csv для діагностики порогів.
-    if (excludeBorderObjects && touchesBorder) return "border_object";
+    if (excludeBorderObjects == 1) {
+        if (touchesBorder == 1) return "border_object";
+    }
     if (area < particleExtractMinArea) return "too_small_noise";
     if (area < minNoiseArea) return "too_small_noise";
     if (area < minSingleCellArea) return "small_cell_or_fragment";
@@ -430,39 +424,119 @@ function classifyObject(area, aspect, touchesBorder) {
         if (aspect > maxSingleCellAspect) return "too_long_artifact";
         return "single_cell_candidate";
     }
-    if (area >= minAggregateArea && area <= maxAggregateArea) {
-        if (aspect > maxAggregateAspect) return "too_long_artifact";
-        return "aggregate_candidate";
+    if (area >= minAggregateArea) {
+        if (area <= maxAggregateArea) {
+            if (aspect > maxAggregateAspect) return "too_long_artifact";
+            return "aggregate_candidate";
+        }
     }
     return "small_cell_or_fragment";
 }
 
 function rejectReasonFor(classification, area) {
-    if (classification == "single_cell_candidate" || classification == "aggregate_candidate") return "";
-    if (classification == "too_small_noise" && area < particleExtractMinArea) return "below_particle_extract_min_area";
+    if (isAcceptedClass(classification) == 1) return "";
+    if (classification == "too_small_noise") {
+        if (area < particleExtractMinArea) return "below_particle_extract_min_area";
+    }
     return classification;
 }
 
 function isAcceptedClass(classification) {
-    return classification == "single_cell_candidate" || classification == "aggregate_candidate";
+    if (classification == "single_cell_candidate") return 1;
+    if (classification == "aggregate_candidate") return 1;
+    return 0;
 }
 
 function objectTouchesBorder(bx, by, bw, bh) {
-    // Metadata bar внизу кадру вважається забороненою областю, як і зовнішні межі frame.
-    if (bx <= borderMarginPx) return true;
-    if (by <= borderMarginPx) return true;
-    if (bx + bw >= width - borderMarginPx) return true;
-    if (by + bh >= height - metadataBarHeight - borderMarginPx) return true;
-    return false;
+    if (bx <= borderMarginPx) return 1;
+    if (by <= borderMarginPx) return 1;
+    if (bx + bw >= width - borderMarginPx) return 1;
+    if (by + bh >= height - metadataBarHeight - borderMarginPx) return 1;
+    return 0;
+}
+
+function clampFloor(value, minValue, maxValue) {
+    roundedValue = floor(value);
+    if (roundedValue < minValue) return minValue;
+    if (roundedValue > maxValue) return maxValue;
+    return roundedValue;
+}
+
+function clampCeil(value, minValue, maxValue) {
+    roundedValue = -floor(-value);
+    if (roundedValue < minValue) return minValue;
+    if (roundedValue > maxValue) return maxValue;
+    return roundedValue;
 }
 
 function whiteCount(title) {
-    // Для binary mask mean/255*area дає кількість white pixels.
-    // Це стабільніше у headless, ніж getHistogram на великих 4000x3000 кадрах.
     selectWindow(title);
     run("Select None");
     getStatistics(areaValue, meanValue);
     return round(areaValue * meanValue / 255);
+}
+
+function savePreviewImage() {
+    selectWindow("Overlay_Combined");
+    run("Duplicate...", "title=Overlay_Preview");
+    needsResize = 0;
+    if (previewMaxSize > 0) {
+        if (width > previewMaxSize) needsResize = 1;
+        if (height > previewMaxSize) needsResize = 1;
+    }
+    if (needsResize == 1) {
+        if (width >= height) {
+            newW = previewMaxSize;
+            newH = round(height * previewMaxSize / width);
+        } else {
+            newH = previewMaxSize;
+            newW = round(width * previewMaxSize / height);
+        }
+        run("Size...", "width=" + newW + " height=" + newH + " interpolation=Bilinear average");
+    }
+    saveAs("Jpeg", outputDir + "/final_analysis_overlay_preview.jpg");
+    close();
+}
+
+function writeQcReport(qcStatus) {
+    report = "# IronCellQuant single-frame QC report\n\n";
+    report += "## Status\n\n" + qcStatus + "\n\n";
+    report += "## Input\n\n";
+    report += "- image_name: " + originalFileName + "\n";
+    report += "- group_name: " + groupName + "\n";
+    report += "- original_long_path: " + originalLongPath + "\n";
+    report += "- width: " + width + "\n";
+    report += "- height: " + height + "\n\n";
+    report += "## Core result\n\n";
+    report += "- component_count_total: " + nObjects + "\n";
+    report += "- accepted_object_count: " + acceptedCount + "\n";
+    report += "- single_cell_candidate_count: " + singleCount + "\n";
+    report += "- aggregate_candidate_count: " + aggregateCount + "\n";
+    report += "- roi_reconstruction_warning_count: " + roiWarningCount + "\n";
+    report += "- accepted_object_pixels: " + d2s(totalAcceptedObjectPixels,0) + "\n";
+    report += "- accepted_blue_pixels: " + d2s(totalAcceptedBluePixels,0) + "\n";
+    report += "- blue_pixel_percent_all_accepted: " + d2s(100*acceptedFraction,4) + "\n";
+    report += "- low_accepted_area_warning: " + boolText(lowAcceptedAreaWarning) + "\n";
+    report += "- min_stable_accepted_objects: " + minStableAcceptedObjects + "\n";
+    report += "- min_stable_accepted_pixels: " + minStableAcceptedPixels + "\n\n";
+    if (qcStatus != "PASS") {
+        report += "## Warnings\n\n";
+        if (acceptedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_ACCEPTED_OBJECT_COUNT: fewer accepted objects than the minimum expected count.\n";
+        if (roiWarningCount > 0) report += "- WARN_ROI_RECONSTRUCTION: one or more objects had ROI reconstruction warnings and were excluded from final accepted summary.\n";
+        if (lowAcceptedAreaWarning == 1) report += "- WARN_LOW_ACCEPTED_AREA: accepted object count or accepted object pixels are low; frame-level blue percent can be unstable and should be interpreted cautiously.\n";
+        report += "\n";
+    }
+    report += "## Notes\n\n";
+    report += "The measured feature is preliminary relative optical blue_pixel_fraction, not absolute iron concentration.\n";
+    report += "Bounding boxes are loop limits only; pixel membership is checked through selectionContains(x,y).\n";
+    File.saveString(report, outputDir + "/extended_qc_report.md");
+}
+
+
+function appendQcStatus(currentStatus, warningStatus) {
+    if (currentStatus == "PASS") return warningStatus;
+    if (indexOf(currentStatus, warningStatus) >= 0) return currentStatus;
+    return currentStatus + ";" + warningStatus;
 }
 
 function getArgString(arg, key, defaultValue) {
@@ -478,15 +552,31 @@ function getArgString(arg, key, defaultValue) {
 function getArgBool(arg, key, defaultValue) {
     v = getArgString(arg, key, "__missing__");
     if (v == "__missing__") return defaultValue;
-    return v == "true" || v == "True" || v == "1" || v == "yes";
+    if (v == "true") return 1;
+    if (v == "True") return 1;
+    if (v == "TRUE") return 1;
+    if (v == "1") return 1;
+    if (v == "yes") return 1;
+    if (v == "Yes") return 1;
+    if (v == "false") return 0;
+    if (v == "False") return 0;
+    if (v == "FALSE") return 0;
+    if (v == "0") return 0;
+    if (v == "no") return 0;
+    if (v == "No") return 0;
+    return defaultValue;
 }
 
 function boolText(value) {
-    if (value) return "true";
+    if (value == 1) return "true";
     return "false";
 }
 
 function logLine(text) {
     File.append(text + "\n", logPath);
     print(text);
+}
+
+function checkpoint(name) {
+    logLine("CHECKPOINT " + name);
 }

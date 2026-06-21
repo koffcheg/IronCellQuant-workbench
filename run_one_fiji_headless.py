@@ -8,37 +8,39 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-PROJECT = Path(r"C:\PERSONAL\ImageJ\IronCells_MVP")
-DEFAULT_OUTPUT_ROOT = PROJECT / "output"
-DEFAULT_MACRO = PROJECT / "macros" / "Main_IronCells_headless.ijm"
-DEFAULT_FIJI = Path(r"C:\PERSONAL\ImageJ\Fiji\fiji.bat")
+SCRIPT_DIR = Path(__file__).resolve().parent
 
-EXPECTED_OUTPUTS = [
-    "final_analysis_overlay.tif",
+ALWAYS_EXPECTED_OUTPUTS = [
     "all_components_before_filter.csv",
-    "per_object_features.csv",
-    "per_image_summary.csv",
+    "rejected_objects.csv",
+    "final_object_report.csv",
+    "blue_pixels_features.csv",
+    "final_frame_summary.csv",
+    "extended_qc_report.md",
     "run_parameters.txt",
     "run_parameters.csv",
     "macro_log.txt",
 ]
 
+OVERLAY_EXPECTED_OUTPUTS = [
+    "final_analysis_overlay.tif",
+    "final_analysis_overlay_preview.jpg",
+]
+
 DEFAULT_PARAMS = {
-    # Параметри нижче напряму передаються у Fiji macro.
-    # Їх можна змінювати з CLI, не редагуючи .ijm файл між експериментами.
-    "threshold_method": "Otsu",
+    "threshold_method": "Li",
     "threshold_mode": "dark",
     "background_rolling": "80",
     "median_radius": "2",
     "contrast_saturated": "0.35",
     "morph_open_iterations": "0",
     "morph_close_iterations": "1",
-    "fill_holes": "false",
-    "metadata_bar_height": "180",
+    "fill_holes": "true",
+    "metadata_bar_height": "120",
     "particle_extract_min_area": "10",
     "particle_extract_max_area": "2000000",
     "min_noise_area": "10",
-    "min_single_cell_area": "80",
+    "min_single_cell_area": "40",
     "max_single_cell_area": "50000",
     "min_aggregate_area": "50000",
     "max_aggregate_area": "2000000",
@@ -51,23 +53,75 @@ DEFAULT_PARAMS = {
     "blue_over_green": "10",
     "save_overlays": "true",
     "label_objects": "true",
+    "draw_rejected_objects": "false",
     "contour_width": "6",
-    "make_segmentation_sweep": "false",
+    "final_overlay_preview_max_size": "1600",
+    "min_expected_accepted_objects": "1",
+    "min_stable_accepted_objects": "3",
+    "min_stable_accepted_pixels": "500",
 }
 
 
+def bool_param(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def resolve_project(value: Path | None) -> Path:
+    # Default project root is the directory containing this runner, not a workstation-specific path.
+    return (value or SCRIPT_DIR).resolve()
+
+
+def resolve_fiji(project: Path, explicit: Path | None) -> Path:
+    # Priority: CLI --fiji, env var, Fiji next to project, Fiji inside project. No user-machine hardcode.
+    if explicit is not None:
+        return explicit.resolve()
+    env_value = os.environ.get("FIJI_PATH") or os.environ.get("FIJI_BAT")
+    if env_value:
+        return Path(env_value).resolve()
+    candidates = [
+        project.parent / "Fiji" / "fiji.bat",
+        project.parent / "Fiji.app" / "fiji.bat",
+        project / "Fiji" / "fiji.bat",
+        project / "Fiji.app" / "fiji.bat",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    raise SystemExit(
+        "Fiji runner not found. Pass --fiji \"R:\\Fiji\\fiji.bat\" "
+        "or set FIJI_PATH. Checked: " + "; ".join(str(c) for c in candidates)
+    )
+
+
+def discover_default_input(project: Path) -> Path:
+    candidates = sorted((project / "input").glob("52*.bmp"))
+    if candidates:
+        for candidate in candidates:
+            if "_2" not in candidate.stem:
+                return candidate
+        return candidates[0]
+    return project / "input" / "52_proto1.bmp"
+
+
+def expected_outputs(params: dict[str, str]) -> list[str]:
+    outputs = list(ALWAYS_EXPECTED_OUTPUTS)
+    if bool_param(params.get("save_overlays", "true")):
+        outputs.extend(OVERLAY_EXPECTED_OUTPUTS)
+    return outputs
+
+
 def windows_short_path(path: Path) -> str:
-    """Повертає 8.3 short path для Fiji, якщо Unicode-шлях може зламатися у fiji.bat."""
+    # Keep Fiji robust with Unicode filenames when Windows 8.3 short names are available.
     if os.name != "nt":
         return str(path)
     escaped = str(path).replace("'", "''")
-    ps = (
+    script = (
         "$fso = New-Object -ComObject Scripting.FileSystemObject; "
         f"$f = $fso.GetFile('{escaped}'); "
         "$f.ShortPath"
     )
     completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", ps],
+        ["powershell", "-NoProfile", "-Command", script],
         text=True,
         capture_output=True,
     )
@@ -77,192 +131,209 @@ def windows_short_path(path: Path) -> str:
     return str(path)
 
 
-def group_name_for(image: Path) -> str:
-    """Назва групи в CSV береться з батьківської папки зображення."""
-    if image.parent.name.lower() == "input":
+def group_name_for(image: Path, project: Path) -> str:
+    try:
+        relative = image.resolve().relative_to((project / "input").resolve())
+        if len(relative.parts) > 1:
+            return relative.parts[0]
         return "mvp_input"
-    return image.parent.name or "unknown"
+    except ValueError:
+        return image.parent.name or "unknown"
 
 
-def discover_default_input() -> Path:
-    """Знаходимо тестовий кадр без жорстко прошитого Unicode-рядка в коді."""
-    candidates = sorted((PROJECT / "input").glob("52*.bmp"))
-    if not candidates:
-        return PROJECT / "input" / "52_proto1.bmp"
-    for candidate in candidates:
-        if "_2" not in candidate.stem:
-            return candidate
-    return candidates[0]
-
-
-def build_macro_arg(image: Path, output: Path, params: dict[str, str]) -> tuple[str, str]:
-    """Формуємо аргументи macro як key=value; Fiji виконує сам аналіз, Python лише передає параметри."""
-    short_input = windows_short_path(image)
-    short_used = "true" if short_input != str(image) else "false"
-    # original_* поля потрібні для CSV, бо short path стабільний для Fiji,
-    # але погано читається людиною і не містить нормальну назву групи/файлу.
-    all_params = {
-        "input": short_input,
-        "output": str(output),
-        "original_long_path": str(image),
-        "original_file_name": image.name,
-        "group_name": group_name_for(image),
-        "short_path_used": short_used,
-        **params,
-    }
-    return ";".join(f"{k}={v}" for k, v in all_params.items()), short_used
-
-
-def create_clean_output(root: Path, prefix: str, clean: bool = False) -> Path:
-    """Кожен запуск отримує чисту папку, щоб старі файли не могли видати себе за новий результат."""
+def create_clean_output(root: Path, prefix: str, clean: bool) -> Path:
     if clean:
         if root.exists():
             shutil.rmtree(root)
-        root.mkdir(parents=True)
+        root.mkdir(parents=True, exist_ok=True)
         return root
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     output = root / f"{prefix}_{run_id}"
-    counter = 2
+    suffix = 2
     while output.exists():
-        output = root / f"{prefix}_{run_id}_{counter}"
-        counter += 1
+        output = root / f"{prefix}_{run_id}_{suffix}"
+        suffix += 1
     output.mkdir(parents=True)
     return output
 
 
-def run_fiji(image: Path, output: Path, params: dict[str, str], fiji: Path, macro: Path, timeout_seconds: int = 180) -> dict[str, str]:
-    """Запускає Fiji headless і перевіряє не тільки exit code, а й файли поточного запуску."""
-    started = datetime.now()
-    macro_arg, _ = build_macro_arg(image, output, params)
-    cmd = [str(fiji), "--headless", "-macro", str(macro), macro_arg]
-    # Параметри пишемо до старту Fiji: навіть якщо macro зависне, буде видно,
-    # з якими налаштуваннями створено цю output-папку.
-    write_run_parameters(output, image, params, fiji, macro, macro_arg)
-    try:
-        # Використовуємо Popen замість subprocess.run, щоб при timeout на Windows
-        # прибрати все дерево процесів fiji.bat -> Fiji/ImageJ.
-        process = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-        completed = subprocess.CompletedProcess(cmd, returncode=process.returncode, stdout=stdout, stderr=stderr)
-        timed_out = False
-    except subprocess.TimeoutExpired:
-        # Якщо Fiji зависає, вбиваємо все дерево fiji.bat -> Fiji/ImageJ, а не тільки wrapper.
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True, text=True)
-        else:
-            process.kill()
-        stdout, stderr = process.communicate()
-        completed = subprocess.CompletedProcess(cmd, returncode=124, stdout=stdout or "", stderr=stderr or "")
-        timed_out = True
-    finished = datetime.now()
-    # stdout/stderr пишуться завжди, навіть якщо Fiji мовчить або повертає 0 без outputs.
-    (output / "fiji_stdout.txt").write_text(completed.stdout, encoding="utf-8", errors="replace")
-    (output / "fiji_stderr.txt").write_text(completed.stderr, encoding="utf-8", errors="replace")
-    (output / "runner_command.txt").write_text(" ".join(cmd), encoding="utf-8", errors="replace")
-    append_runner_parameters_to_macro_log(output, params)
-    # Перевірка timestamp захищає від stale outputs у папці, яку могли повторно використати вручну.
-    # Debug masks та окремі overlay не є обов'язковими, якщо їх вимкнули для економії I/O.
-    missing = []
-    stale = []
-    for name in EXPECTED_OUTPUTS:
-        path = output / name
-        if not path.exists():
-            missing.append(name)
-        elif datetime.fromtimestamp(path.stat().st_mtime) < started:
-            stale.append(name)
-    # Важливо: returncode 0 від Fiji сам по собі не означає успіх.
-    # Успіх — це returncode 0 + усі очікувані файли + файли новіші за час старту.
-    ok = completed.returncode == 0 and not missing and not stale
-    return {
-        "image": str(image),
+def build_macro_arg(image: Path, output: Path, project: Path, params: dict[str, str]) -> tuple[str, str]:
+    short_input = windows_short_path(image)
+    short_used = "true" if short_input != str(image) else "false"
+    macro_params = {
+        "input": short_input,
         "output": str(output),
-        "returncode": str(completed.returncode),
-        "started": started.isoformat(timespec="seconds"),
-        "finished": finished.isoformat(timespec="seconds"),
-        "missing_outputs": ";".join(missing),
-        "stale_outputs": ";".join(stale),
-        "timed_out": str(timed_out),
-        "ok": str(ok),
+        "original_long_path": str(image),
+        "original_file_name": image.name,
+        "group_name": group_name_for(image, project),
+        "short_path_used": short_used,
+        **params,
     }
+    return ";".join(f"{k}={v}" for k, v in macro_params.items()), short_used
 
 
-def write_run_parameters(output: Path, image: Path, params: dict[str, str], fiji: Path, macro: Path, macro_arg: str) -> None:
-    """Пишемо параметри runner'ом, щоб macro не зупинявся на довгих File.append рядках."""
+def write_run_parameters(output: Path, project: Path, image: Path, fiji: Path, macro: Path, macro_arg: str, params: dict[str, str]) -> None:
+    outputs = expected_outputs(params)
     lines = [
+        f"project={project}",
         f"input={image}",
         f"output={output}",
         f"macro={macro}",
         f"fiji={fiji}",
         f"macro_argument_string={macro_arg}",
+        "expected_outputs=" + ";".join(outputs),
     ]
     lines.extend(f"{key}={value}" for key, value in params.items())
     (output / "run_parameters.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     with (output / "run_parameters.csv").open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["parameter", "value"])
-        writer.writerow(["input", str(image)])
-        writer.writerow(["output", str(output)])
-        writer.writerow(["macro", str(macro)])
-        writer.writerow(["fiji", str(fiji)])
+        for key, value in [
+            ("project", project),
+            ("input", image),
+            ("output", output),
+            ("macro", macro),
+            ("fiji", fiji),
+            ("expected_outputs", ";".join(outputs)),
+        ]:
+            writer.writerow([key, str(value)])
         for key, value in params.items():
             writer.writerow([key, value])
 
 
 def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) -> None:
-    """Додаємо параметри в macro_log після Fiji, щоб macro не ламався на довгих log-рядках."""
-    log_path = output / "macro_log.txt"
-    with log_path.open("a", encoding="utf-8", errors="replace") as f:
+    with (output / "macro_log.txt").open("a", encoding="utf-8", errors="replace") as f:
         f.write("\nRunner parameter summary:\n")
         for key, value in params.items():
             f.write(f"{key}={value}\n")
 
 
+def read_last_checkpoint(output: Path) -> str:
+    log_path = output / "macro_log.txt"
+    if not log_path.exists():
+        return ""
+    last = ""
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("CHECKPOINT "):
+            last = line
+    return last
+
+
+def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, params: dict[str, str], timeout_seconds: int) -> dict[str, str]:
+    started = datetime.now()
+    macro_arg, _ = build_macro_arg(image, output, project, params)
+    cmd = [str(fiji), "--headless", "-macro", str(macro), macro_arg]
+    write_run_parameters(output, project, image, fiji, macro, macro_arg, params)
+
+    timed_out = False
+    process = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        returncode = process.returncode
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True, text=True)
+        else:
+            process.kill()
+        stdout, stderr = process.communicate()
+        returncode = 124
+
+    finished = datetime.now()
+    (output / "fiji_stdout.txt").write_text(stdout or "", encoding="utf-8", errors="replace")
+    (output / "fiji_stderr.txt").write_text(stderr or "", encoding="utf-8", errors="replace")
+    (output / "runner_command.txt").write_text(" ".join(cmd), encoding="utf-8", errors="replace")
+    append_runner_parameters_to_macro_log(output, params)
+
+    missing = []
+    stale = []
+    empty = []
+    for name in expected_outputs(params):
+        path = output / name
+        if not path.exists():
+            missing.append(name)
+        elif datetime.fromtimestamp(path.stat().st_mtime) < started:
+            stale.append(name)
+        elif path.stat().st_size == 0:
+            empty.append(name)
+
+    last_checkpoint = read_last_checkpoint(output)
+    ok = returncode == 0 and not missing and not stale and not empty
+    return {
+        "project": str(project),
+        "image": str(image),
+        "output": str(output),
+        "returncode": str(returncode),
+        "started": started.isoformat(timespec="seconds"),
+        "finished": finished.isoformat(timespec="seconds"),
+        "missing_outputs": ";".join(missing),
+        "stale_outputs": ";".join(stale),
+        "empty_outputs": ";".join(empty),
+        "last_checkpoint": last_checkpoint,
+        "timed_out": str(timed_out),
+        "ok": str(ok),
+    }
+
+
 def add_param_args(parser: argparse.ArgumentParser) -> None:
-    """Додаємо всі ключові параметри Fiji macro без редагування коду між експериментами."""
     for key, value in DEFAULT_PARAMS.items():
         parser.add_argument("--" + key.replace("_", "-"), default=value)
 
 
 def params_from_args(args: argparse.Namespace) -> dict[str, str]:
-    """Збирає тільки macro-параметри, не змішуючи їх зі службовими CLI полями runner'а."""
     return {key: str(getattr(args, key)) for key in DEFAULT_PARAMS}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one Fiji/ImageJ IronCells analysis into a fresh output folder.")
-    parser.add_argument("--input", type=Path, default=discover_default_input())
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--output", type=Path, help="Exact output folder. Use with --clean-output to intentionally reuse it.")
-    parser.add_argument("--clean-output", action="store_true", help="Delete and recreate --output before running.")
+    parser = argparse.ArgumentParser(description="Run one Fiji/ImageJ IronCells analysis.")
+    parser.add_argument("--project", type=Path, help="Project folder. Defaults to the folder containing this script.")
+    parser.add_argument("--input", type=Path, help="Image path. Defaults to project/input/52*.bmp.")
+    parser.add_argument("--output-root", type=Path, help="Output root. Defaults to project/output.")
+    parser.add_argument("--output", type=Path, help="Exact output folder. Use with --clean-output to reuse it intentionally.")
+    parser.add_argument("--clean-output", action="store_true")
     parser.add_argument("--prefix", default="single_test")
-    parser.add_argument("--macro", type=Path, default=DEFAULT_MACRO)
-    parser.add_argument("--fiji", type=Path, default=DEFAULT_FIJI)
+    parser.add_argument("--macro", type=Path, help="Macro path. Defaults to project/macros/Main_IronCells_headless.ijm.")
+    parser.add_argument("--fiji", type=Path, help="Path to fiji.bat. Can also be set by FIJI_PATH.")
     parser.add_argument("--timeout-seconds", type=int, default=180)
     add_param_args(parser)
     return parser.parse_args()
 
 
 def main() -> int:
-    # main() не аналізує зображення. Він тільки валідує шляхи, створює output і запускає Fiji.
     args = parse_args()
-    if not args.input.exists():
-        raise SystemExit(f"Input not found: {args.input}")
-    if not args.fiji.exists():
-        raise SystemExit(f"Fiji runner not found: {args.fiji}")
-    if not args.macro.exists():
-        raise SystemExit(f"Macro not found: {args.macro}")
+    project = resolve_project(args.project)
+    image = (args.input or discover_default_input(project)).resolve()
+    output_root = (args.output_root or (project / "output")).resolve()
+    macro = (args.macro or (project / "macros" / "Main_IronCells_headless.ijm")).resolve()
+    fiji = resolve_fiji(project, args.fiji)
 
-    output = create_clean_output(args.output or args.output_root, args.prefix, clean=args.clean_output and args.output is not None)
-    row = run_fiji(args.input, output, params_from_args(args), args.fiji, args.macro, timeout_seconds=args.timeout_seconds)
+    if not project.exists():
+        raise SystemExit(f"Project folder not found: {project}")
+    if not image.exists():
+        raise SystemExit(f"Input not found: {image}")
+    if not macro.exists():
+        raise SystemExit(f"Macro not found: {macro}")
+    if not fiji.exists():
+        raise SystemExit(f"Fiji runner not found: {fiji}")
+
+    output = create_clean_output((args.output or output_root).resolve(), args.prefix, args.clean_output and args.output is not None)
+    row = run_fiji(project, image, output, fiji, macro, params_from_args(args), args.timeout_seconds)
+
     with (output / "runner_report.csv").open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(row))
         writer.writeheader()
         writer.writerow(row)
+
     print(f"ok={row['ok']} returncode={row['returncode']} output={output}")
     if row["missing_outputs"]:
         print(f"missing={row['missing_outputs']}")
     if row["stale_outputs"]:
         print(f"stale={row['stale_outputs']}")
+    if row["empty_outputs"]:
+        print(f"empty={row['empty_outputs']}")
+    if row["last_checkpoint"]:
+        print(f"last_checkpoint={row['last_checkpoint']}")
     return 0 if row["ok"] == "True" else 1
 
 
