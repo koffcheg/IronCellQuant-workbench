@@ -31,14 +31,18 @@ Current code has been cleaned so the normal run saves only essential artifacts:
 
 Intermediate masks and debug overlays are intentionally not saved by default because the source frames are large, e.g. 4000x3000 pixels.
 
-Latest local test status:
+Current validation status should be checked on each workstation with the smoke-test commands below because raw microscopy inputs and Fiji are local-only and not committed.
 
-- Fiji launches correctly through `fiji.bat`.
-- Python creates a fresh output directory and rejects stale/incomplete outputs.
-- The macro opens the test image, builds the segmentation grayscale image, thresholds it, and reaches morphology.
-- The last test timed out after `morph_close`; final CSV/overlay output was not yet produced.
+## Output Contract
 
-So this repository currently captures the cleaned MVP codebase and the next debugging point, not a validated final analysis method.
+A successful single-frame run writes the existing baseline artifacts and these point-4 review/export artifacts:
+
+- `review_detection_overlay.tif`
+- `review_detection_overlay_preview.jpg`
+- `blue_pixels_features.xlsx`
+- `frame_features_for_pca.csv`
+
+The XLSX is a human-facing sorted copy of `blue_pixels_features.csv` with a final SUM row. The PCA-ready CSV is a one-row-per-run feature table; it does not perform PCA.
 
 ## Repository Layout
 
@@ -63,6 +67,7 @@ output/
 - Windows
 - Fiji/ImageJ installed locally
 - Python 3.10+
+- Python package: `openpyxl`
 
 Pass the Fiji launcher path with `--fiji` or set `FIJI_PATH`. The runner also checks for `Fiji` / `Fiji.app` adjacent to or inside the project folder.
 

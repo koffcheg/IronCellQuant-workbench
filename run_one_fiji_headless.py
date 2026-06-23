@@ -5,10 +5,8 @@ import csv
 import os
 import shutil
 import subprocess
-import zipfile
-from html import escape
-from typing import Any
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -95,7 +93,7 @@ def resolve_fiji(project: Path, explicit: Path | None) -> Path:
         if candidate.exists():
             return candidate.resolve()
     raise SystemExit(
-        "Fiji runner not found. Pass --fiji \"R:\\Fiji\\fiji.bat\" "
+        "Fiji runner not found. Pass --fiji <path-to-fiji-launcher> "
         "or set FIJI_PATH. Checked: " + "; ".join(str(c) for c in candidates)
     )
 
@@ -232,55 +230,63 @@ def validate_expected_outputs(output: Path, params: dict[str, str], started: dat
 
 
 def write_blue_pixels_xlsx(output: Path) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
     csv_path = output / "blue_pixels_features.csv"
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
 
     object_rows = [row for row in rows if row.get("object_id") != "frame"]
     object_rows.sort(key=lambda row: float(row.get("blue_pixel_percent") or 0), reverse=True)
-    columns = ["image_name", "group_name", "object_type", "object_id", "object_pixels", "blue_pixels", "blue_pixel_fraction", "blue_pixel_percent"]
-    table: list[list[Any]] = [columns]
-    table.extend([[coerce_cell(row.get(column, "")) for column in columns] for row in object_rows])
+    columns = [
+        "image_name",
+        "group_name",
+        "object_type",
+        "object_id",
+        "object_pixels",
+        "blue_pixels",
+        "blue_pixel_fraction",
+        "blue_pixel_percent",
+    ]
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "blue_pixels_features"
+    worksheet.append(columns)
+    for row in object_rows:
+        worksheet.append([coerce_cell(row.get(column, "")) for column in columns])
 
     total_object_pixels = sum(float(row.get("object_pixels") or 0) for row in object_rows)
     total_blue_pixels = sum(float(row.get("blue_pixels") or 0) for row in object_rows)
     total_fraction = total_blue_pixels / total_object_pixels if total_object_pixels else 0
-    table.append(["SUM", "", "all_accepted_cell_material", "", int(total_object_pixels), int(total_blue_pixels), total_fraction, 100 * total_fraction])
-    write_minimal_xlsx(output / "blue_pixels_features.xlsx", table, "blue_pixels_features")
+    worksheet.append([
+        "SUM",
+        "",
+        "all_accepted_cell_material",
+        "",
+        int(total_object_pixels),
+        int(total_blue_pixels),
+        total_fraction,
+        100 * total_fraction,
+    ])
 
-
-def write_minimal_xlsx(path: Path, table: list[list[Any]], sheet_name: str) -> None:
-    rows_xml = []
-    for r_idx, row in enumerate(table, start=1):
-        cells = []
-        for c_idx, value in enumerate(row, start=1):
-            ref = f"{excel_column(c_idx)}{r_idx}"
-            style = ' s="1"' if r_idx == 1 or r_idx == len(table) else ""
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                cells.append(f'<c r="{ref}"{style}><v>{value}</v></c>')
-            else:
-                cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t>{escape(str(value))}</t></is></c>')
-        rows_xml.append(f'<row r="{r_idx}">{"".join(cells)}</row>')
-    dimension = f"A1:{excel_column(len(table[0]))}{len(table)}" if table else "A1:A1"
-    cols = "".join(f'<col min="{i}" max="{i}" width="18" customWidth="1"/>' for i in range(1, len(table[0]) + 1))
-    worksheet = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="{dimension}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols>{cols}</cols><sheetData>{"".join(rows_xml)}</sheetData><autoFilter ref="{dimension}"/></worksheet>'
-    workbook = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{escape(sheet_name)}" sheetId="1" r:id="rId1"/></sheets></workbook>'
-    styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font/><font><b/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>'
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>')
-        zf.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
-        zf.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
-        zf.writestr("xl/workbook.xml", workbook)
-        zf.writestr("xl/worksheets/sheet1.xml", worksheet)
-        zf.writestr("xl/styles.xml", styles)
-
-
-def excel_column(index: int) -> str:
-    name = ""
-    while index:
-        index, remainder = divmod(index - 1, 26)
-        name = chr(65 + remainder) + name
-    return name
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+    for cell in worksheet[worksheet.max_row]:
+        cell.font = Font(bold=True)
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    for column_cells in worksheet.columns:
+        width = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells) + 2
+        worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(max(width, 10), 40)
+    for row in worksheet.iter_rows(min_row=2, min_col=7, max_col=8):
+        row[0].number_format = "0.00000000"
+        row[1].number_format = "0.0000"
+    workbook.save(output / "blue_pixels_features.xlsx")
 
 
 def coerce_cell(value: str) -> Any:
