@@ -209,7 +209,7 @@ tooLargeCount = 0; tooLongCount = 0; borderCount = 0; roiWarningCount = 0; accep
 totalAcceptedObjectPixels = 0; totalAcceptedBluePixels = 0;
 acceptedRSum = 0; acceptedGSum = 0; acceptedBSum = 0;
 acceptedRSqSum = 0; acceptedGSqSum = 0; acceptedBSqSum = 0;
-acceptedBOverRSum = 0; acceptedBOverRGBSumSum = 0; acceptedGraySqSum = 0;
+acceptedBOverRSum = 0; acceptedBOverRGBSumSum = 0; acceptedGraySum = 0; acceptedGraySqSum = 0;
 
 allCsv = outputDir + "/all_components_before_filter.csv";
 File.saveString("component_id,area_px,centroid_x,centroid_y,bbox_x,bbox_y,bbox_width,bbox_height,aspect_ratio,touches_border,classification,accepted_for_summary,reject_reason\n", allCsv);
@@ -305,7 +305,8 @@ for (i = 0; i < nObjects; i++) {
         acceptedBSqSum += (stdB * stdB + meanB * meanB) * objectPixels;
         acceptedBOverRSum += bOverR * objectPixels;
         acceptedBOverRGBSumSum += bOverRgbSum * objectPixels;
-        acceptedGraySqSum += grayStd * grayStd * objectPixels;
+        acceptedGraySum += grayMean * objectPixels;
+        acceptedGraySqSum += (grayStd * grayStd + grayMean * grayMean) * objectPixels;
         objectType = classification;
         File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + (i+1) + "," + objectType + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(stdR,3) + "," + d2s(stdG,3) + "," + d2s(stdB,3) + "," + d2s(minR,0) + "," + d2s(minG,0) + "," + d2s(minB,0) + "," + d2s(maxR,0) + "," + d2s(maxG,0) + "," + d2s(maxB,0) + "," + d2s(rOverG,6) + "," + d2s(bOverR,6) + "," + d2s(bOverRgbSum,6) + "," + d2s(grayMean,3) + "," + d2s(grayStd,3) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus + "\n", objectCsv);
         File.append(originalFileName + "," + groupName + "," + objectType + "," + (i+1) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "\n", blueCsv);
@@ -342,9 +343,11 @@ if (totalAcceptedObjectPixels > 0) {
     acceptedBStd = sqrt(maxOf(0, acceptedBSqSum / totalAcceptedObjectPixels - acceptedBMean * acceptedBMean));
     acceptedBOverRMean = acceptedBOverRSum / totalAcceptedObjectPixels;
     acceptedBOverRGBSumMean = acceptedBOverRGBSumSum / totalAcceptedObjectPixels;
-    acceptedGrayStddev = sqrt(maxOf(0, acceptedGraySqSum / totalAcceptedObjectPixels));
+    acceptedGrayMean = acceptedGraySum / totalAcceptedObjectPixels;
+    acceptedGrayVariance = acceptedGraySqSum / totalAcceptedObjectPixels - acceptedGrayMean * acceptedGrayMean;
+    acceptedGrayStddev = sqrt(maxOf(0, acceptedGrayVariance));
 } else {
-    acceptedFraction = 0; acceptedRMean = 0; acceptedGMean = 0; acceptedBMean = 0; acceptedRStd = 0; acceptedGStd = 0; acceptedBStd = 0; acceptedBOverRMean = 0; acceptedBOverRGBSumMean = 0; acceptedGrayStddev = 0;
+    acceptedFraction = 0; acceptedRMean = 0; acceptedGMean = 0; acceptedBMean = 0; acceptedRStd = 0; acceptedGStd = 0; acceptedBStd = 0; acceptedBOverRMean = 0; acceptedBOverRGBSumMean = 0; acceptedGrayMean = 0; acceptedGrayStddev = 0;
 }
 acceptedAreaFractionOfFrame = totalAcceptedObjectPixels / framePixels;
 acceptedAreaPercentOfFrame = 100 * acceptedAreaFractionOfFrame;
@@ -456,14 +459,20 @@ function drawObjectOverlay(id, classification, area, accepted, fraction, bx, by)
 
 function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
     selectWindow("Review_Detection_Overlay");
-    makeRectangle(bx, by, bw, bh);
+    rectX = clampFloor(bx, 0, width - 1);
+    rectY = clampFloor(by, 0, height - 1);
+    rectW = maxOf(1, round(bw));
+    rectH = maxOf(1, round(bh));
+    if (rectX + rectW > width) rectW = width - rectX;
+    if (rectY + rectH > height) rectH = height - rectY;
+    makeRectangle(rectX, rectY, rectW, rectH);
     setLineWidth(contourWidth);
     setForegroundColor(255,255,0);
     run("Draw", "slice");
     if (labelObjects == 1) {
         setFont("SansSerif", 18, "bold");
         setColor(255,255,0);
-        drawString("#" + id, bx, maxOf(20, by-6));
+        drawString("#" + id, rectX, maxOf(20, rectY-6));
     }
     run("Select None");
 }

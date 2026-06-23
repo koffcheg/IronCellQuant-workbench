@@ -305,8 +305,8 @@ def write_frame_features_for_pca(output: Path) -> None:
     summary = read_single_csv_row(output / "final_frame_summary.csv")
     fieldnames = [
         "image_name", "width", "height", "frame_area_pixels", "component_count_total",
-        "accepted_object_count", "accepted_object_pixels", "accepted_area_percent_of_frame",
-        "accepted_blue_pixels", "blue_pixel_percent_all_accepted", "accepted_R_mean",
+        "accepted_object_count", "accepted_object_pixels", "accepted_area_fraction_of_frame",
+        "accepted_area_percent_of_frame", "accepted_blue_pixels", "blue_pixel_percent_all_accepted", "accepted_R_mean",
         "accepted_G_mean", "accepted_B_mean", "accepted_R_std", "accepted_G_std",
         "accepted_B_std", "accepted_B_over_R_mean", "accepted_B_over_RGB_sum_mean",
         "accepted_gray_stddev", "qc_status",
@@ -319,6 +319,7 @@ def write_frame_features_for_pca(output: Path) -> None:
         "component_count_total": summary.get("component_count_total", ""),
         "accepted_object_count": summary.get("accepted_object_count", ""),
         "accepted_object_pixels": summary.get("accepted_object_pixels", ""),
+        "accepted_area_fraction_of_frame": summary.get("accepted_area_fraction_of_frame", ""),
         "accepted_area_percent_of_frame": summary.get("accepted_area_percent_of_frame", ""),
         "accepted_blue_pixels": summary.get("accepted_blue_pixels", ""),
         "blue_pixel_percent_all_accepted": summary.get("blue_pixel_percent_all_accepted", ""),
