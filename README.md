@@ -6,8 +6,8 @@ This project is intentionally small and conservative:
 
 - Fiji/ImageJ macro code performs the image processing.
 - Python is only a runner/wrapper for launching Fiji, passing parameters, creating clean output folders, checking outputs, and writing run metadata.
-- The project does **not** estimate absolute iron concentration.
-- The current target feature is a preliminary relative optical metric:
+- The project does **not** estimate calibrated material concentration.
+- The current target feature is a preliminary blue-pixel optical metric:
 
 ```text
 blue_pixel_fraction = blue_pixels / object_pixels
@@ -21,8 +21,10 @@ The active pipeline is still an MVP/work in progress.
 Current code has been cleaned so the normal run saves only essential artifacts:
 
 - one final visual overlay: `final_analysis_overlay.tif`
+- one review bounding-box overlay: `review_detection_overlay.tif`
 - component/object CSV files
-- image summary CSV
+- image summary CSV and PCA-ready frame feature CSV
+- blue-pixel CSV and review XLSX
 - run parameters
 - Fiji stdout/stderr
 - macro log
@@ -45,7 +47,6 @@ IronCells_MVP/
   macros/
     Main_IronCells_headless.ijm
   run_one_fiji_headless.py
-  run_one_fiji_headless.bat
   README.md
   .gitignore
 ```
@@ -63,21 +64,15 @@ output/
 - Fiji/ImageJ installed locally
 - Python 3.10+
 
-Current local Fiji runner path:
-
-```text
-C:\PERSONAL\ImageJ\Fiji\fiji.bat
-```
-
-If Fiji is installed elsewhere, pass `--fiji` to the runner.
+Pass the Fiji launcher path with `--fiji` or set `FIJI_PATH`. The runner also checks for `Fiji` / `Fiji.app` adjacent to or inside the project folder.
 
 ## Running One Image
 
 From the project folder:
 
 ```powershell
-cd C:\PERSONAL\ImageJ\IronCells_MVP
-.\run_one_fiji_headless.bat
+cd <repo>
+python run_one_fiji_headless.py --fiji <path-to-fiji-launcher>
 ```
 
 Or explicitly:
