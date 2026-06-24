@@ -5,6 +5,7 @@ import csv
 import os
 import shutil
 import importlib.util
+import zlib
 import subprocess
 from datetime import datetime
 from typing import Any
@@ -608,10 +609,91 @@ def read_last_checkpoint(output: Path) -> str:
     return last
 
 
-def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, params: dict[str, str], timeout_seconds: int) -> dict[str, str]:
+def write_simple_tiff(path: Path, width: int, height: int, fill: int = 0) -> None:
+    pixels = bytes([fill]) * width * height
+    entries = [
+        (256, 4, 1, width),
+        (257, 4, 1, height),
+        (258, 3, 1, 8),
+        (259, 3, 1, 1),
+        (273, 4, 1, 0),
+        (277, 3, 1, 1),
+        (279, 4, 1, len(pixels)),
+    ]
+    ifd_len = 2 + 12 * len(entries) + 4
+    pixel_offset = 8 + ifd_len
+    data = b"II" + (42).to_bytes(2, "little") + (8).to_bytes(4, "little") + len(entries).to_bytes(2, "little")
+    for tag, typ, count, value in entries:
+        if tag == 273:
+            value = pixel_offset
+        data += tag.to_bytes(2, "little") + typ.to_bytes(2, "little") + count.to_bytes(4, "little") + value.to_bytes(4, "little")
+    path.write_bytes(data + (0).to_bytes(4, "little") + pixels)
+
+
+def write_simple_png(path: Path, width: int, height: int, rgb: tuple[int, int, int] = (0, 0, 0)) -> None:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return len(payload).to_bytes(4, "big") + kind + payload + zlib.crc32(kind + payload).to_bytes(4, "big")
+    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def write_weka_missing_outputs(output: Path, image: Path, image_stem: str, weka_model: Path, params: dict[str, str]) -> None:
+    width, height = read_image_dimensions(image)
+    write_simple_tiff(output / f"cellmask_{image_stem}.tif", width, height, 0)
+    write_simple_tiff(output / f"blue_inside_cells_{image_stem}.tif", width, height, 0)
+    write_simple_png(output / f"vis_cellpixels_{image_stem}.png", width, height, (80, 0, 80))
+    write_simple_png(output / f"roi_overlay_{image_stem}.jpg", width, height, (80, 0, 0))
+
+    cell_header = "image_name,group_name,original_long_path,short_path_used,object_id,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
+    (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
+    shutil.copy2(output / "cell_features.csv", output / f"cell_features_{image_stem}.csv")
+    (output / "blue_pixels_features.csv").write_text("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", encoding="utf-8-sig")
+    write_blue_pixels_xlsx(output)
+    shutil.copy2(output / "blue_table.xlsx", output / f"blue_table_{image_stem}.xlsx")
+
+    summary_header = "image_name,image_width,image_height,accepted_object_count,accepted_object_pixels,accepted_blue_pixels,blue_pixel_percent_all_accepted,qc_status\n"
+    summary_row = f"{image.name},{width},{height},0,0,0,0,FAIL_WEKA_MODEL_MISSING\n"
+    (output / "final_frame_summary.csv").write_text(summary_header + summary_row, encoding="utf-8-sig")
+    shutil.copy2(output / "final_frame_summary.csv", output / f"frame_features_{image_stem}.csv")
+    report = (
+        "# IronCellQuant single-frame QC report\n\n"
+        "## Status\n\nFAIL_WEKA_MODEL_MISSING\n\n"
+        "## Weka model\n\n"
+        f"Expected Weka model path does not exist: {weka_model}\n\n"
+        "No accepted biological ROI/cell-material regions were produced. Final placeholder outputs were written for QC review only.\n"
+    )
+    (output / "extended_qc_report.md").write_text(report, encoding="utf-8")
+    move_internal_outputs(output)
+
+
+def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, params: dict[str, str], timeout_seconds: int, weka_model: Path | None = None) -> dict[str, str]:
     started = datetime.now()
     fiji_input = prepare_fiji_input(image, output)
-    macro_arg, _ = build_macro_arg(fiji_input, image, output, project, params)
+    if weka_model is not None and not weka_model.exists():
+        macro_arg, _ = build_macro_arg(fiji_input, image, output, project, {**params, "weka_model": str(weka_model)})
+        write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, params)
+        write_weka_missing_outputs(output, image, image.stem, weka_model, params)
+        finished = datetime.now()
+        return {
+            "project": str(project),
+            "image": str(image),
+            "fiji_input": str(fiji_input),
+            "weka_model": str(weka_model),
+            "output": str(output),
+            "returncode": "0",
+            "started": started.isoformat(timespec="seconds"),
+            "finished": finished.isoformat(timespec="seconds"),
+            "missing_outputs": "",
+            "stale_outputs": "",
+            "empty_outputs": "",
+            "last_checkpoint": "",
+            "timed_out": "False",
+            "postprocess_error": "FAIL_WEKA_MODEL_MISSING",
+            "ok": "False",
+        }
+    macro_params = params if weka_model is None else {**params, "weka_model": str(weka_model)}
+    macro_arg, _ = build_macro_arg(fiji_input, image, output, project, macro_params)
     cmd = [str(fiji), "--headless", "-macro", str(macro), macro_arg]
     write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, params)
 
@@ -653,6 +735,7 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
         "project": str(project),
         "image": str(image),
         "fiji_input": str(fiji_input),
+        "weka_model": "" if weka_model is None else str(weka_model),
         "output": str(output),
         "returncode": str(returncode),
         "started": started.isoformat(timespec="seconds"),
@@ -686,6 +769,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefix", default="single_test")
     parser.add_argument("--macro", type=Path, help="Macro path. Defaults to project/macros/Main_IronCells_headless.ijm.")
     parser.add_argument("--fiji", type=Path, help="Path to fiji.bat. Can also be set by FIJI_PATH.")
+    parser.add_argument("--weka-model", type=Path, help="Optional Fiji Trainable Weka Segmentation .model path for cell-material detection.")
     parser.add_argument("--timeout-seconds", type=int, default=180)
     add_param_args(parser)
     return parser.parse_args()
@@ -709,7 +793,7 @@ def main() -> int:
         raise SystemExit(f"Fiji runner not found: {fiji}")
 
     output = create_clean_output((args.output or output_root).resolve(), args.prefix, args.clean_output and args.output is not None)
-    row = run_fiji(project, image, output, fiji, macro, params_from_args(args), args.timeout_seconds)
+    row = run_fiji(project, image, output, fiji, macro, params_from_args(args), args.timeout_seconds, args.weka_model.resolve() if args.weka_model else None)
 
     with (output / "runner_report.csv").open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(row))
