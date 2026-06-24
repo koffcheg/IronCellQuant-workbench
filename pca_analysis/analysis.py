@@ -301,13 +301,18 @@ def _plan_delivery_export(
         "PCA_TopFeatures.csv",
         "PCA_Correlation_With_BluePixel.csv",
         "PCA_Report.txt",
-        "PCA_Scatter_PC1_PC2.png",
         "PCA_Biplot_PC1_PC2.png",
         "PCA_ExplainedVariance.png",
         "PCA_Loadings_PC1.png",
         "PCA_Loadings_PC2.png",
         "PCA_Loadings_PC3.png",
     ]
+    dynamic_scatter_files = [
+        name
+        for name in result.generated_files
+        if name.startswith("PCA_Scatter_") and name.endswith(".png")
+    ]
+    source_names = _unique_names(source_names + dynamic_scatter_files)
 
     planned_files: list[dict[str, str]] = []
     for source_name in source_names:
@@ -365,3 +370,14 @@ def _generated_delivery_path(output_dir: Path, delivery_dir: Path, destination_n
         return str(destination.relative_to(output_dir))
     except ValueError:
         return str(destination)
+
+
+def _unique_names(names: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        unique.append(name)
+    return unique
