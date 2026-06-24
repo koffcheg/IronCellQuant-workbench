@@ -37,6 +37,13 @@ OVERLAY_EXPECTED_OUTPUTS = [
     "blue_inside_cells.tif",
 ]
 
+DEBUG_OUTPUTS = [
+    "debug_texture_evidence_mask.tif",
+    "debug_edge_evidence_mask.tif",
+    "debug_candidate_mask_raw.tif",
+    "debug_candidate_mask_cleaned.tif",
+]
+
 FINAL_OUTPUT_MAP = {
     "cellmask.tif": "cellmask_{image_stem}.tif",
     "vis_cellpixels.png": "vis_cellpixels_{image_stem}.png",
@@ -67,7 +74,7 @@ DEFAULT_PARAMS = {
     "max_single_cell_aspect": "4",
     "max_aggregate_aspect": "8",
     "exclude_border_objects": "true",
-    "border_margin_px": "2",
+    "border_margin_px": "20",
     "blue_min": "120",
     "blue_over_red": "20",
     "blue_over_green": "10",
@@ -482,7 +489,10 @@ def images_effectively_same(path_a: Path, path_b: Path) -> bool:
 
 
 def validate_frame_summary(output: Path) -> dict[str, float]:
-    summary = read_single_csv_row(output / "final_frame_summary.csv")
+    summary_path = output / "final_frame_summary.csv"
+    if not summary_path.exists():
+        summary_path = output / "_internal" / "final_frame_summary.csv"
+    summary = read_single_csv_row(summary_path)
     accepted_objects = float(summary.get("accepted_object_count") or 0)
     accepted_pixels = float(summary.get("accepted_object_pixels") or 0)
     accepted_blue = float(summary.get("accepted_blue_pixels") or 0)
@@ -525,6 +535,12 @@ def validate_output_image_dimensions(output: Path, image_stem: str, original_ima
 
 def validate_cell_feature_table(output: Path) -> None:
     path = output / "cell_features.csv"
+    if not path.exists():
+        candidates = sorted(output.glob("cell_features_*.csv"))
+        if candidates:
+            path = candidates[0]
+        else:
+            path = output / "_internal" / "cell_features.csv"
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             object_pixels = float(row.get("object_pixels") or 0)
@@ -551,7 +567,7 @@ def copy_final_named_outputs(output: Path, image_stem: str) -> None:
 def move_internal_outputs(output: Path) -> None:
     internal = output / "_internal"
     internal.mkdir(exist_ok=True)
-    for name in set(ALWAYS_EXPECTED_OUTPUTS + OVERLAY_EXPECTED_OUTPUTS + ["blue_table.xlsx", "fiji_stdout.txt", "fiji_stderr.txt", "runner_command.txt", "fiji_work"]):
+    for name in set(ALWAYS_EXPECTED_OUTPUTS + OVERLAY_EXPECTED_OUTPUTS + DEBUG_OUTPUTS + ["blue_table.xlsx", "fiji_stdout.txt", "fiji_stderr.txt", "runner_command.txt", "fiji_work"]):
         source = output / name
         if source.exists():
             target = internal / name
@@ -564,12 +580,12 @@ def move_internal_outputs(output: Path) -> None:
 
 
 def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
-    validate_frame_summary(output)
-    validate_cell_feature_table(output)
     write_blue_pixels_xlsx(output)
     copy_final_named_outputs(output, image_stem)
-    validate_output_image_dimensions(output, image_stem, original_image, params)
     move_internal_outputs(output)
+    validate_frame_summary(output)
+    validate_cell_feature_table(output)
+    validate_output_image_dimensions(output, image_stem, original_image, params)
     # final_frame_summary.csv is written by the macro; Python copies it to the final frame_features_<original_stem>.csv name.
 
 def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) -> None:
