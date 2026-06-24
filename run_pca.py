@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from pca_analysis.config import load_config
+from pca_analysis.config import load_config, validate_config
 from pca_analysis.analysis import run_pca_analysis
 from pca_analysis.data_io import ensure_output_dir
 from pca_analysis.preprocessing import preprocess_features
@@ -28,6 +28,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config(args.config)
+        config_errors = validate_config(config)
+        if config_errors:
+            print("Configuration error:", file=sys.stderr)
+            for error in config_errors:
+                print(f"- {error}", file=sys.stderr)
+            return 2
     except Exception as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2

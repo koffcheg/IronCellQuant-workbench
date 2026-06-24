@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import joblib
 import numpy as np
 import pandas as pd
-import sklearn
 from sklearn.decomposition import PCA
 
 from .config import PCAConfig
-from .data_io import write_text_report
+from .model_io import write_pca_model, write_run_metadata
 from .preprocessing import PreprocessingResult
+from .reporting import write_pca_report
 from .validation import ValidationResult
 from .visualization import write_pca_visualizations
 
@@ -136,7 +133,8 @@ def run_pca_analysis(
         axis=1,
     )
     top_features = _calculate_top_features(loadings, component_names, config.top_feature_count)
-    correlations = _calculate_target_correlations(preprocessed, config, service_columns, result.warnings)
+    raw_numeric = preprocessing_result.raw_numeric_features
+    correlations = _calculate_target_correlations(raw_numeric, config, service_columns, result.warnings)
 
     result.summary = summary
     result.scores = scores
@@ -163,14 +161,14 @@ def run_pca_analysis(
             summary,
             scores,
             loadings,
-            preprocessed,
+            raw_numeric,
             component_names,
             result.warnings,
         )
     )
-    _write_report(input_path, output_path, config, validation_result, preprocessing_result, result)
-    _write_metadata(input_path, output_path, config, validation_result, preprocessing_result, result)
-    _write_model(output_path, config, preprocessing_result, result)
+    write_pca_report(input_path, output_path, config, validation_result, preprocessing_result, result)
+    write_run_metadata(input_path, output_path, config, validation_result, preprocessing_result, result)
+    write_pca_model(output_path, config, preprocessing_result, result)
 
     return result
 
@@ -196,35 +194,34 @@ def _calculate_top_features(loadings: pd.DataFrame, component_names: list[str], 
 
 
 def _calculate_target_correlations(
-    dataframe: pd.DataFrame,
+    dataframe: pd.DataFrame | None,
     config: PCAConfig,
     service_columns: list[str],
     warnings: list[str],
 ) -> pd.DataFrame:
     columns = ["Rank", "Feature", "CorrelationWithTarget", "AbsCorrelation", "Direction", "Strength"]
     target = config.target_feature
+    if dataframe is None:
+        warnings.append("Raw numeric feature matrix is absent; correlation analysis was skipped.")
+        return pd.DataFrame(columns=columns)
     if not target or target not in dataframe.columns:
         warnings.append(f"Target feature '{target}' is absent; correlation analysis was skipped.")
         return pd.DataFrame(columns=columns)
 
-    numeric_columns = dataframe.select_dtypes(include="number").columns.tolist()
-    if target not in numeric_columns:
-        warnings.append(f"Target feature '{target}' is not numeric; correlation analysis was skipped.")
+    target_values = pd.to_numeric(dataframe[target], errors="coerce")
+    if target_values.notna().sum() < 2:
+        warnings.append(f"Target feature '{target}' is missing or non-numeric; correlation analysis was skipped.")
         return pd.DataFrame(columns=columns)
 
     method = config.correlation_method.lower()
-    if method not in {"pearson", "spearman"}:
-        warnings.append(
-            f"Unsupported correlation_method '{config.correlation_method}'; using pearson instead."
-        )
-        method = "pearson"
-
-    feature_columns = [
-        column for column in numeric_columns if column != target and column not in set(service_columns)
-    ]
+    numeric_columns = dataframe.select_dtypes(include="number").columns.tolist()
+    feature_columns = [column for column in numeric_columns if column != target and column not in set(service_columns)]
     rows: list[dict[str, Any]] = []
     for feature in feature_columns:
-        correlation = dataframe[target].corr(dataframe[feature], method=method)
+        feature_values = pd.to_numeric(dataframe[feature], errors="coerce")
+        if feature_values.notna().sum() < 2:
+            continue
+        correlation = target_values.corr(feature_values, method=method)
         if pd.isna(correlation):
             continue
         rows.append(
@@ -279,141 +276,3 @@ def _write_csv(output_dir: Path, filename: str, dataframe: pd.DataFrame, result:
     path = output_dir / filename
     dataframe.to_csv(path, index=False)
     result.generated_files.append(filename)
-
-
-def _write_report(
-    input_path: str | Path,
-    output_dir: Path,
-    config: PCAConfig,
-    validation_result: ValidationResult,
-    preprocessing_result: PreprocessingResult,
-    result: PCAAnalysisResult,
-) -> None:
-    summary = result.summary if result.summary is not None else pd.DataFrame()
-    top_features = result.top_features if result.top_features is not None else pd.DataFrame()
-    correlations = result.correlations if result.correlations is not None else pd.DataFrame()
-
-    lines = [
-        "PCA Report",
-        "==========",
-        f"Input file: {Path(input_path)}",
-        f"Total objects analysed: {0 if result.scores is None else len(result.scores)}",
-        f"Original columns count: {validation_result.column_count}",
-        f"Numeric features before preprocessing: {len(preprocessing_result.feature_columns_before)}",
-        f"Features after preprocessing: {len(preprocessing_result.feature_columns_after)}",
-        "Removed features and reasons:",
-    ]
-    if preprocessing_result.removed_features_reasons:
-        for feature, reason in sorted(preprocessing_result.removed_features_reasons.items()):
-            lines.append(f"- {feature}: {reason}")
-    else:
-        lines.append("- none")
-
-    lines.extend(
-        [
-            f"Missing value strategy: {config.missing_value_strategy}",
-            f"Standardization enabled: {config.standardization_enabled}",
-            f"Number of PCA components: {len(result.component_names)}",
-            "Loadings method: sklearn PCA components_.T (MVP implementation).",
-        ]
-    )
-
-    for pc_index in range(1, 4):
-        component = f"PC{pc_index}"
-        row = summary[summary["PC"] == component]
-        if not row.empty:
-            lines.append(
-                f"{component} explained variance: {float(row['ExplainedVariancePercent'].iloc[0]):.6f}%"
-            )
-
-    if not summary.empty:
-        lines.append(
-            f"Cumulative explained variance: {float(summary['CumulativePercent'].iloc[-1]):.6f}%"
-        )
-    if result.recommended_component_count is not None:
-        lines.append(
-            "Recommended number of components for "
-            f"min_explained_variance={config.min_explained_variance}: {result.recommended_component_count}"
-        )
-
-    lines.append("")
-    lines.append("Top features for PC1/PC2/PC3:")
-    for component in ["PC1", "PC2", "PC3"]:
-        component_rows = top_features[top_features["PC"] == component]
-        if component_rows.empty:
-            lines.append(f"{component}: not available")
-        else:
-            joined = ", ".join(
-                f"{row.Feature} ({row.Loading:.6f})" for row in component_rows.itertuples(index=False)
-            )
-            lines.append(f"{component}: {joined}")
-
-    lines.append("")
-    lines.append(f"Features most correlated with {config.target_feature}:")
-    if correlations.empty:
-        lines.append("- none")
-    else:
-        for row in correlations.head(config.top_feature_count).itertuples(index=False):
-            lines.append(
-                f"- {row.Feature}: {row.CorrelationWithTarget:.6f} "
-                f"({row.Direction}, {row.Strength})"
-            )
-
-    lines.append("")
-    lines.append("Warnings:")
-    all_warnings = validation_result.warnings + preprocessing_result.warnings + result.warnings
-    lines.extend([f"- {warning}" for warning in all_warnings] or ["- none"])
-    lines.append("")
-    lines.append(
-        "Conclusion: Results describe statistical associations and candidate features only; "
-        "they are not evidence of actual iron concentration."
-    )
-
-    write_text_report(output_dir / "PCA_Report.txt", "\n".join(lines) + "\n")
-    result.generated_files.append("PCA_Report.txt")
-
-
-def _write_metadata(
-    input_path: str | Path,
-    output_dir: Path,
-    config: PCAConfig,
-    validation_result: ValidationResult,
-    preprocessing_result: PreprocessingResult,
-    result: PCAAnalysisResult,
-) -> None:
-    metadata = {
-        "run_timestamp": datetime.now(timezone.utc).isoformat(),
-        "input_path": str(Path(input_path)),
-        "output_path": str(output_dir),
-        "config": asdict(config),
-        "selected_features": result.selected_features,
-        "removed_features": preprocessing_result.removed_features_reasons,
-        "warnings": validation_result.warnings + preprocessing_result.warnings + result.warnings,
-        "generated_files": result.generated_files + ["PCA_Run_Metadata.json", "PCA_Model.joblib"],
-        "library_versions": {
-            "joblib": joblib.__version__,
-            "numpy": np.__version__,
-            "pandas": pd.__version__,
-            "scikit_learn": sklearn.__version__,
-        },
-    }
-    path = output_dir / "PCA_Run_Metadata.json"
-    path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    result.generated_files.append("PCA_Run_Metadata.json")
-
-
-def _write_model(
-    output_dir: Path,
-    config: PCAConfig,
-    preprocessing_result: PreprocessingResult,
-    result: PCAAnalysisResult,
-) -> None:
-    model_payload = {
-        "scaler": preprocessing_result.scaler,
-        "pca_model": result.pca_model,
-        "selected_feature_names": result.selected_features,
-        "service_columns": config.service_columns or [],
-        "config": asdict(config),
-    }
-    joblib.dump(model_payload, output_dir / "PCA_Model.joblib")
-    result.generated_files.append("PCA_Model.joblib")

@@ -178,26 +178,36 @@ Do not run full-directory batch processing until the single-image pipeline produ
 
 ## PCA Analysis
 
-The PCA module is independent from Fiji/ImageJ and from the current image-processing macro. It consumes an already prepared FeatureMatrix CSV and writes PCA tables, plots, reports, metadata, and a serialized model.
+The PCA module is independent from Fiji/ImageJ and from the current image-processing macro. It consumes an already prepared universal FeatureMatrix CSV and writes PCA tables, plots, reports, metadata, and a serialized model. The current Fiji macro is not a required data source for PCA.
 
 Input format:
 
 - one row per analysed object (`object x features`);
 - service columns are required: `image_name`, `object_type`, `object_id`;
 - all non-service numeric columns are treated as candidate features unless excluded by config;
+- at least 2 objects/rows and at least 2 numeric PCA features are required;
+- CSV rows must have the same number of fields as the header;
 - the module does not estimate or report actual iron concentration.
 
 Run with defaults:
 
 ```powershell
-python .\run_pca.py --input .\output\frame_features_for_pca.csv --output .\output\pca_run
+python .\run_pca.py --input .\FeatureMatrix.csv --output .\output\pca_run
+```
+
+or, if a combined matrix was produced by another workflow:
+
+```powershell
+python .\run_pca.py --input .\output\combined_feature_matrix.csv --output .\output\pca_run
 ```
 
 Run with a JSON config:
 
 ```powershell
-python .\run_pca.py --input .\output\frame_features_for_pca.csv --output .\output\pca_run --config .\pca_config.json
+python .\run_pca.py --input .\FeatureMatrix.csv --output .\output\pca_run --config .\pca_config.json
 ```
+
+Frame-level CSV files can be used only when they form a real multi-row feature matrix, for example after combining several frames/runs into one CSV. A single-row run summary is not sufficient for PCA.
 
 Common config fields include:
 
@@ -223,7 +233,7 @@ Primary output files:
 - `PCA_Scores.csv`
 - `PCA_TopFeatures.csv`
 - `PCA_Correlation_With_BluePixel.csv`
-- `PCA_Scatter_PC1_PC2.png`
+- `PCA_Scatter_PC1_PC2.png` by default, or `PCA_Scatter_<PCX>_<PCY>.png` for a configured component pair such as `PCA_Scatter_PC1_PC3.png`
 - `PCA_Biplot_PC1_PC2.png`
 - `PCA_ExplainedVariance.png`
 - `PCA_Report.txt`
@@ -231,3 +241,5 @@ Primary output files:
 - `PCA_Model.joblib`
 
 `PCA_Scores.csv` stores object coordinates in principal-component space. `PCA_Loadings.csv` stores feature loadings used to interpret components. `PCA_TopFeatures.csv` ranks the strongest contributors per component. `PCA_Correlation_With_BluePixel.csv` summarizes statistical association with `blue_pixel_percent`; it is not a calibrated measurement of iron concentration.
+
+When `exclude_target_from_pca=true`, `target_feature` is excluded only from the PCA feature matrix and loadings. The raw target remains available for correlation analysis, scatter coloring, reports, and metadata when it exists and can be converted to numeric. Scatter color values for `blue_pixel_percent` use raw/original numeric values, not standardized z-scores.

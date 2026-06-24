@@ -25,7 +25,7 @@ def write_pca_visualizations(
     summary: pd.DataFrame,
     scores: pd.DataFrame,
     loadings: pd.DataFrame,
-    standardized_features: pd.DataFrame,
+    raw_numeric_features: pd.DataFrame | None,
     component_names: list[str],
     warnings: list[str],
 ) -> list[str]:
@@ -44,9 +44,10 @@ def write_pca_visualizations(
                 config,
                 summary,
                 scores,
-                standardized_features,
+                raw_numeric_features,
                 scatter_x,
                 scatter_y,
+                warnings,
             )
         )
     else:
@@ -98,16 +99,22 @@ def _write_scatter(
     config: PCAConfig,
     summary: pd.DataFrame,
     scores: pd.DataFrame,
-    standardized_features: pd.DataFrame,
+    raw_numeric_features: pd.DataFrame | None,
     component_x: str,
     component_y: str,
+    warnings: list[str],
 ) -> str:
-    filename = "PCA_Scatter_PC1_PC2.png"
+    filename = f"PCA_Scatter_{component_x}_{component_y}.png"
     path = output_dir / filename
 
     fig, ax = plt.subplots(figsize=(7, 6), dpi=150)
-    color_values = _numeric_color_values(standardized_features, config.color_feature)
+    color_values = _numeric_color_values(raw_numeric_features, config.color_feature)
     if color_values is None:
+        if config.color_feature:
+            warnings.append(
+                f"Scatter color feature '{config.color_feature}' is unavailable as complete raw numeric data; "
+                "scatter was written without color encoding."
+            )
         ax.scatter(scores[component_x], scores[component_y], s=34, alpha=0.82, edgecolor="none")
     else:
         scatter = ax.scatter(
@@ -120,7 +127,7 @@ def _write_scatter(
             edgecolor="none",
         )
         colorbar = fig.colorbar(scatter, ax=ax)
-        colorbar.set_label(config.color_feature)
+        colorbar.set_label(f"{config.color_feature} (raw)")
 
     ax.axhline(0, color="#666666", linewidth=0.8, alpha=0.45)
     ax.axvline(0, color="#666666", linewidth=0.8, alpha=0.45)
@@ -180,8 +187,8 @@ def _write_biplot(
     return filename
 
 
-def _numeric_color_values(dataframe: pd.DataFrame, color_feature: str | None) -> pd.Series | None:
-    if not color_feature or color_feature not in dataframe.columns:
+def _numeric_color_values(dataframe: pd.DataFrame | None, color_feature: str | None) -> pd.Series | None:
+    if dataframe is None or not color_feature or color_feature not in dataframe.columns:
         return None
     values = pd.to_numeric(dataframe[color_feature], errors="coerce")
     if values.isna().any():
