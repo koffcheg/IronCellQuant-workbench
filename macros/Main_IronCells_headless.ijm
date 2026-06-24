@@ -694,7 +694,11 @@ function writeQcReport(qcStatus) {
     report += "- min_stable_accepted_pixels: " + minStableAcceptedPixels + "\n\n";
     if (qcStatus != "PASS") {
         report += "## Warnings\n\n";
-        if (acceptedCount == 0) report += "- FAIL_NO_ACCEPTED_OBJECTS: no accepted biological ROI/cell-material regions found; detected candidates were rejected as artifacts.\n";
+        if (acceptedCount == 0) {
+            report += "- FAIL_NO_ACCEPTED_OBJECTS: Stage 1A detector found no accepted biological ROI/cell-material regions.\n";
+            if (borderCount > 0) report += "- Only rejected border/annotation artifact candidates were detected in this run; they are not reported as biological ROIs.\n";
+            report += "- Stage 1B supervised detector investigation is required before biological interpretation of this frame.\n";
+        }
         if (acceptedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_ACCEPTED_OBJECT_COUNT: fewer accepted objects than the minimum expected count.\n";
         if (roiWarningCount > 0) report += "- WARN_ROI_RECONSTRUCTION: one or more objects had ROI reconstruction warnings and were excluded from final accepted summary.\n";
         if (lowAcceptedAreaWarning == 1) report += "- WARN_LOW_ACCEPTED_AREA: accepted object count or accepted object pixels are low; frame-level blue percent can be unstable and should be interpreted cautiously.\n";
@@ -703,6 +707,7 @@ function writeQcReport(qcStatus) {
     report += "## Notes\n\n";
     report += "The measured feature is preliminary relative optical blue_pixel_fraction, not a calibrated concentration measurement.\n";
     report += "Bounding boxes are loop limits only; pixel membership is checked through selectionContains(x,y).\n";
+    if (acceptedCount == 0) report += "This run is a detector/QC failure, not a successful biological Stage 1A result; use the generated files only for debugging and Stage 1B detector planning.\n";
     File.saveString(report, outputDir + "/extended_qc_report.md");
 }
 
