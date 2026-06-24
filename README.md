@@ -1,177 +1,77 @@
 # IronCellQuant
 
-Fiji/ImageJ headless MVP for preliminary quantification of iron-staining in microscopy images.
+IronCellQuant — це консервативний Fiji/ImageJ headless pipeline для Stage 1: **автоматичний аналіз одного raw RGB кадру** з клітинним матеріалом та оптичною синьою ознакою фарбування.
 
-This project is intentionally small and conservative:
+## Наукове правило Stage 1
 
-- Fiji/ImageJ macro code performs the image processing.
-- Python is only a runner/wrapper for launching Fiji, passing parameters, creating clean output folders, checking outputs, and writing run metadata.
-- The project does **not** estimate calibrated material concentration.
-- The current target feature is a preliminary blue-pixel optical metric:
+Первинний об’єкт аналізу — **не синя або темна частинка**. Первинний об’єкт — це автоматично знайдена ROI-подібна область, що містить клітинний матеріал. Така область може відповідати одній клітині, кільком клітинам, агрегату або видимому фрагменту клітинного матеріалу.
+
+Сині пікселі рахуються **лише всередині автоматично знайдених пікселів клітинного матеріалу** і є ознакою фарбування, а не окремими первинними об’єктами сегментації.
 
 ```text
 blue_pixel_fraction = blue_pixels / object_pixels
 blue_pixel_percent = 100 * blue_pixel_fraction
 ```
 
-## Current Status
+`blue_pixel_percent` — це попередня оптична ознака синього фарбування. Вона **не є каліброваною концентрацією заліза** або іншою кількісною хімічною концентрацією.
 
-The active pipeline is still an MVP/work in progress.
+## Що робить single-frame pipeline
 
-Current code has been cleaned so the normal run saves only essential artifacts:
+1. Завантажує один raw RGB мікроскопічний кадр.
+2. Зберігає оригінальне RGB-зображення як джерело для всіх вимірювань кольору.
+3. Створює окреме grayscale-зображення для сегментації клітинного матеріалу від фону.
+4. Будує `cell_material_mask`.
+5. Видаляє дрібний шум/спекли, що не є клітинним матеріалом.
+6. Будує прийняті ROI-подібні області навколо зв’язаних або згрупованих зон клітинного матеріалу.
+7. Для кожної прийнятої області рахує:
+   - `roi_area_pixels` — площа повної bounding ROI-області;
+   - `object_pixels` — кількість пікселів клітинного матеріалу всередині області, а не площа прямокутника;
+   - `blue_pixels` — кількість пікселів, що задовольняють синє правило, тільки всередині `object_pixels`;
+   - `blue_pixel_fraction` та `blue_pixel_percent`;
+   - RGB mean/std/min/max на пікселях клітинного матеріалу;
+   - `R_div_G`, `B_div_R`, `B_div_RGB_sum`;
+   - intensity/gray mean/std/min/max;
+   - геометричні та площинні ознаки;
+   - `object_type`, коли це можливо: `single_cell`, `aggregate`, `cell_region` або frame-level `all_cell_material`.
 
-- one final visual overlay: `final_analysis_overlay.tif`
-- one review bounding-box overlay: `review_detection_overlay.tif`
-- component/object CSV files
-- image summary CSV and PCA-ready frame feature CSV
-- blue-pixel CSV and review XLSX
-- run parameters
-- Fiji stdout/stderr
-- macro log
+Внутрішні сині/темні частинки можуть бути підсвічені як ознаки фарбування, але вони не отримують власні primary-object boxes.
 
-Intermediate masks and debug overlays are intentionally not saved by default because the source frames are large, e.g. 4000x3000 pixels.
+## Виходи одного кадру
 
-Current validation status should be checked on each workstation with the smoke-test commands below because raw microscopy inputs and Fiji are local-only and not committed.
+Для вхідного файлу `<original>` успішний запуск створює Stage 1 артефакти:
 
-## Output Contract
+- `cellmask_<original>.tif` — маска клітинного матеріалу;
+- `vis_cellpixels_<original>.png` — raw RGB з підсвіченими пікселями клітинного матеріалу кольором, відсутнім в оригінальному кадрі;
+- `roi_overlay_<original>.jpg` — overlay ROI-подібних областей клітинного матеріалу та ID;
+- `blue_inside_cells_<original>.tif` — сині пікселі, обмежені маскою клітинного матеріалу;
+- `blue_table_<original>.xlsx` — таблиця синіх пікселів, відсортована за `blue_pixel_percent` спадно, з останнім рядком `SUM`;
+- `cell_features_<original>.csv` — ознаки кожного прийнятого ROI/cell-material об’єкта;
+- `frame_features_<original>.csv` — frame-level біологічні ознаки.
 
-A successful single-frame run writes the existing baseline artifacts and these point-4 review/export artifacts:
+Також можуть створюватися стабільні короткі alias-файли без `<original>` для сумісності runner-а: `cellmask.tif`, `vis_cellpixels.png`, `roi_overlay.jpg`, `blue_inside_cells.tif`, `blue_table.xlsx`, `cell_features.csv`, `frame_features.csv`.
 
-- `review_detection_overlay.tif`
-- `review_detection_overlay_preview.jpg`
-- `blue_pixels_features.xlsx`
-- `frame_features_for_pca.csv`
+## `blue_table_<original>.xlsx`
 
-The XLSX is a human-facing sorted copy of `blue_pixels_features.csv` with a final SUM row. The PCA-ready CSV is a one-row-per-run feature table; it does not perform PCA.
-
-## Repository Layout
+- Один рядок відповідає одному прийнятому ROI/cell-material об’єкту.
+- Рядки об’єктів відсортовані за `blue_pixel_percent` у спадному порядку.
+- Останній рядок — `SUM`.
+- Для `SUM`:
 
 ```text
-IronCells_MVP/
-  macros/
-    Main_IronCells_headless.ijm
-  run_one_fiji_headless.py
-  README.md
-  .gitignore
+SUM blue_pixel_percent = 100 * total_blue_pixels / total_cell_material_pixels
 ```
 
-Local-only data folders are ignored by Git:
-
-```text
-input/
-output/
-```
-
-## Requirements
-
-- Windows
-- Fiji/ImageJ installed locally
-- Python 3.10+
-- Python package: `openpyxl`
-
-Pass the Fiji launcher path with `--fiji` or set `FIJI_PATH`. The runner also checks for `Fiji` / `Fiji.app` adjacent to or inside the project folder.
-
-## Running One Image
-
-From the project folder:
+## Запуск одного зображення
 
 ```powershell
-cd <repo>
-python run_one_fiji_headless.py --fiji <path-to-fiji-launcher>
+python .\run_one_fiji_headless.py --input "C:\path\to\raw_image.bmp" --timeout-seconds 300
 ```
 
-Or explicitly:
+Якщо `--input` не передано, runner шукає тестовий файл у `input\52*.bmp`. Fiji потрібно передати через `--fiji` або змінну середовища `FIJI_PATH`; hardcoded локальні шляхи не використовуються.
 
-```powershell
-python .\run_one_fiji_headless.py --timeout-seconds 300
-```
+## Обмеження цього етапу
 
-The runner automatically finds a default test input in `input\52*.bmp`.
-
-You can also pass an explicit image:
-
-```powershell
-python .\run_one_fiji_headless.py --input "C:\path\to\image.bmp" --timeout-seconds 300
-```
-
-Each run writes to a fresh folder:
-
-```text
-output\single_test_YYYYMMDD_HHMMSS
-```
-
-The runner considers a run successful only if:
-
-- Fiji returns exit code `0`;
-- every required output exists;
-- required outputs were written during the current run, not left over from an older run.
-
-## Main Parameters
-
-Segmentation:
-
-- `threshold_method`
-- `threshold_mode`
-- `background_rolling`
-- `median_radius`
-- `contrast_saturated`
-- `morph_open_iterations`
-- `morph_close_iterations`
-- `fill_holes`
-- `metadata_bar_height`
-
-Particle extraction and classification:
-
-- `particle_extract_min_area`
-- `particle_extract_max_area`
-- `min_noise_area`
-- `min_single_cell_area`
-- `max_single_cell_area`
-- `min_aggregate_area`
-- `max_aggregate_area`
-- `max_single_cell_aspect`
-- `max_aggregate_aspect`
-- `exclude_border_objects`
-- `border_margin_px`
-
-Blue-pixel rule:
-
-- `blue_min`
-- `blue_over_red`
-- `blue_over_green`
-
-Default rule:
-
-```text
-B > blue_min
-B > R + blue_over_red
-B > G + blue_over_green
-```
-
-## Macro Method
-
-The Fiji macro is structured as:
-
-1. Open original RGB image.
-2. Split original RGB channels for color measurements.
-3. Build grayscale segmentation image.
-4. Threshold and morphologically clean a cell-material mask.
-5. Run connected-component extraction with `Analyze Particles`.
-6. Classify components by area, aspect ratio, and border/metadata contact.
-7. Reconstruct each component ROI with `doWand()`.
-8. Compare reconstructed ROI area against `Analyze Particles` area.
-9. Count blue pixels only inside the real ROI using `selectionContains(x, y)`.
-10. Write object-level and image-level CSV files.
-11. Save one final overlay for visual inspection.
-
-Bounding boxes are used only to limit loops for speed. They are not used as measurement regions.
-
-## Notes For Future Work
-
-Immediate next debugging target:
-
-- avoid or optimize the slow Fiji morphology/particle stage on full 4000x3000 frames;
-- consider a Fiji-native ROI/particle strategy that does not require full-frame expensive operations;
-- keep output minimal until the segmentation profile is stable.
-
-Do not run full-directory batch processing until the single-image pipeline produces a visually acceptable `final_analysis_overlay.tif`.
+- Batch-обробка директорій не реалізується у Stage 1.
+- PCA не виконується і PCA-output не створюється.
+- Референсні вручну промарковані приклади не є входом алгоритму; вони призначені тільки для пізнішої людської візуальної оцінки якості.
+- Згенеровані вихідні артефакти мають залишатися поза Git.
