@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -15,7 +16,9 @@ ALWAYS_EXPECTED_OUTPUTS = [
     "rejected_objects.csv",
     "final_object_report.csv",
     "blue_pixels_features.csv",
+    "blue_pixels_features.xlsx",
     "final_frame_summary.csv",
+    "frame_features_for_pca.csv",
     "extended_qc_report.md",
     "run_parameters.txt",
     "run_parameters.csv",
@@ -25,6 +28,8 @@ ALWAYS_EXPECTED_OUTPUTS = [
 OVERLAY_EXPECTED_OUTPUTS = [
     "final_analysis_overlay.tif",
     "final_analysis_overlay_preview.jpg",
+    "review_detection_overlay.tif",
+    "review_detection_overlay_preview.jpg",
 ]
 
 DEFAULT_PARAMS = {
@@ -88,7 +93,7 @@ def resolve_fiji(project: Path, explicit: Path | None) -> Path:
         if candidate.exists():
             return candidate.resolve()
     raise SystemExit(
-        "Fiji runner not found. Pass --fiji \"R:\\Fiji\\fiji.bat\" "
+        "Fiji runner not found. Pass --fiji <path-to-fiji-launcher> "
         "or set FIJI_PATH. Checked: " + "; ".join(str(c) for c in candidates)
     )
 
@@ -202,6 +207,143 @@ def write_run_parameters(output: Path, project: Path, image: Path, fiji: Path, m
             writer.writerow([key, value])
 
 
+
+def read_single_csv_row(path: Path) -> dict[str, str]:
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    return rows[0] if rows else {}
+
+
+def validate_expected_outputs(output: Path, params: dict[str, str], started: datetime) -> tuple[list[str], list[str], list[str]]:
+    missing: list[str] = []
+    stale: list[str] = []
+    empty: list[str] = []
+    for name in expected_outputs(params):
+        path = output / name
+        if not path.exists():
+            missing.append(name)
+        elif datetime.fromtimestamp(path.stat().st_mtime) < started:
+            stale.append(name)
+        elif path.stat().st_size == 0:
+            empty.append(name)
+    return missing, stale, empty
+
+
+def write_blue_pixels_xlsx(output: Path) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    csv_path = output / "blue_pixels_features.csv"
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    object_rows = [row for row in rows if row.get("object_id") != "frame"]
+    object_rows.sort(key=lambda row: float(row.get("blue_pixel_percent") or 0), reverse=True)
+    columns = [
+        "image_name",
+        "group_name",
+        "object_type",
+        "object_id",
+        "object_pixels",
+        "blue_pixels",
+        "blue_pixel_fraction",
+        "blue_pixel_percent",
+    ]
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "blue_pixels_features"
+    worksheet.append(columns)
+    for row in object_rows:
+        worksheet.append([coerce_cell(row.get(column, "")) for column in columns])
+
+    total_object_pixels = sum(float(row.get("object_pixels") or 0) for row in object_rows)
+    total_blue_pixels = sum(float(row.get("blue_pixels") or 0) for row in object_rows)
+    total_fraction = total_blue_pixels / total_object_pixels if total_object_pixels else 0
+    worksheet.append([
+        "SUM",
+        "",
+        "all_accepted_cell_material",
+        "",
+        int(total_object_pixels),
+        int(total_blue_pixels),
+        total_fraction,
+        100 * total_fraction,
+    ])
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+    for cell in worksheet[worksheet.max_row]:
+        cell.font = Font(bold=True)
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    for column_cells in worksheet.columns:
+        width = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells) + 2
+        worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(max(width, 10), 40)
+    for row in worksheet.iter_rows(min_row=2, min_col=7, max_col=8):
+        row[0].number_format = "0.00000000"
+        row[1].number_format = "0.0000"
+    workbook.save(output / "blue_pixels_features.xlsx")
+
+
+def coerce_cell(value: str) -> Any:
+    if value is None or value == "":
+        return ""
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def write_frame_features_for_pca(output: Path) -> None:
+    summary = read_single_csv_row(output / "final_frame_summary.csv")
+    fieldnames = [
+        "image_name", "width", "height", "frame_area_pixels", "component_count_total",
+        "accepted_object_count", "accepted_object_pixels", "accepted_area_fraction_of_frame",
+        "accepted_area_percent_of_frame", "accepted_blue_pixels", "blue_pixel_percent_all_accepted", "accepted_R_mean",
+        "accepted_G_mean", "accepted_B_mean", "accepted_R_std", "accepted_G_std",
+        "accepted_B_std", "accepted_B_over_R_mean", "accepted_B_over_RGB_sum_mean",
+        "accepted_gray_stddev", "qc_status",
+    ]
+    row = {
+        "image_name": summary.get("image_name", ""),
+        "width": summary.get("image_width", ""),
+        "height": summary.get("image_height", ""),
+        "frame_area_pixels": summary.get("frame_area_pixels", ""),
+        "component_count_total": summary.get("component_count_total", ""),
+        "accepted_object_count": summary.get("accepted_object_count", ""),
+        "accepted_object_pixels": summary.get("accepted_object_pixels", ""),
+        "accepted_area_fraction_of_frame": summary.get("accepted_area_fraction_of_frame", ""),
+        "accepted_area_percent_of_frame": summary.get("accepted_area_percent_of_frame", ""),
+        "accepted_blue_pixels": summary.get("accepted_blue_pixels", ""),
+        "blue_pixel_percent_all_accepted": summary.get("blue_pixel_percent_all_accepted", ""),
+        "accepted_R_mean": summary.get("accepted_R_mean", ""),
+        "accepted_G_mean": summary.get("accepted_G_mean", ""),
+        "accepted_B_mean": summary.get("accepted_B_mean", ""),
+        "accepted_R_std": summary.get("accepted_R_std", ""),
+        "accepted_G_std": summary.get("accepted_G_std", ""),
+        "accepted_B_std": summary.get("accepted_B_std", ""),
+        "accepted_B_over_R_mean": summary.get("accepted_B_over_R_mean", ""),
+        "accepted_B_over_RGB_sum_mean": summary.get("accepted_B_over_RGB_sum_mean", ""),
+        "accepted_gray_stddev": summary.get("accepted_gray_stddev", ""),
+        "qc_status": summary.get("qc_status", ""),
+    }
+    with (output / "frame_features_for_pca.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(row)
+
+
+def postprocess_outputs(output: Path) -> None:
+    write_blue_pixels_xlsx(output)
+    write_frame_features_for_pca(output)
+
 def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) -> None:
     with (output / "macro_log.txt").open("a", encoding="utf-8", errors="replace") as f:
         f.write("\nRunner parameter summary:\n")
@@ -246,17 +388,10 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     (output / "runner_command.txt").write_text(" ".join(cmd), encoding="utf-8", errors="replace")
     append_runner_parameters_to_macro_log(output, params)
 
-    missing = []
-    stale = []
-    empty = []
-    for name in expected_outputs(params):
-        path = output / name
-        if not path.exists():
-            missing.append(name)
-        elif datetime.fromtimestamp(path.stat().st_mtime) < started:
-            stale.append(name)
-        elif path.stat().st_size == 0:
-            empty.append(name)
+    if returncode == 0:
+        postprocess_outputs(output)
+
+    missing, stale, empty = validate_expected_outputs(output, params, started)
 
     last_checkpoint = read_last_checkpoint(output)
     ok = returncode == 0 and not missing and not stale and not empty

@@ -58,7 +58,7 @@ logLine("Input(short/Fiji): " + inputPath);
 logLine("Input(original): " + originalLongPath);
 logLine("Output: " + outputDir);
 logLine("Group: " + groupName);
-logLine("Feature definition: blue_pixel_fraction = blue_pixels / object_pixels. This is not absolute iron concentration.");
+logLine("Feature definition: blue_pixel_fraction = blue_pixels / object_pixels. This is a preliminary blue-pixel optical feature, not a calibrated concentration measurement.");
 
 setBatchMode(true);
 run("Clear Results");
@@ -79,6 +79,9 @@ originalTitle = "Original_RGB";
 checkpoint("prepared_original_rgb_window");
 
 checkpoint("before_split_rgb_channels");
+selectWindow("Original_RGB");
+run("Duplicate...", "title=Gray_Channel");
+run("8-bit");
 selectWindow("Original_RGB");
 run("Duplicate...", "title=RGB_For_Channels");
 run("Split Channels");
@@ -204,13 +207,16 @@ componentsGe50 = 0; componentsGe100 = 0; componentsGe200 = 0; componentsGe500 = 
 singleCount = 0; aggregateCount = 0; tooSmallCount = 0; smallFragmentCount = 0;
 tooLargeCount = 0; tooLongCount = 0; borderCount = 0; roiWarningCount = 0; acceptedCount = 0;
 totalAcceptedObjectPixels = 0; totalAcceptedBluePixels = 0;
+acceptedRSum = 0; acceptedGSum = 0; acceptedBSum = 0;
+acceptedRSqSum = 0; acceptedGSqSum = 0; acceptedBSqSum = 0;
+acceptedBOverRSum = 0; acceptedBOverRGBSumSum = 0; acceptedGraySum = 0; acceptedGraySqSum = 0;
 
 allCsv = outputDir + "/all_components_before_filter.csv";
 File.saveString("component_id,area_px,centroid_x,centroid_y,bbox_x,bbox_y,bbox_width,bbox_height,aspect_ratio,touches_border,classification,accepted_for_summary,reject_reason\n", allCsv);
 rejectedCsv = outputDir + "/rejected_objects.csv";
 File.saveString("image_name,group_name,object_id,classification,reject_reason,area_px,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,touches_border,roi_reconstruction_status\n", rejectedCsv);
 objectCsv = outputDir + "/final_object_report.csv";
-File.saveString("image_name,group_name,original_long_path,short_path_used,object_id,object_type,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,area_px,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,mean_R,mean_G,mean_B,roi_area_from_particles,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n", objectCsv);
+File.saveString("image_name,group_name,original_long_path,short_path_used,object_id,object_type,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,area_px,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,mean_R,mean_G,mean_B,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_over_G,B_over_R,B_over_RGB_sum,gray_mean,gray_stddev,roi_area_from_particles,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n", objectCsv);
 blueCsv = outputDir + "/blue_pixels_features.csv";
 File.saveString("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", blueCsv);
 
@@ -218,6 +224,8 @@ if (saveOverlays == 1) {
     checkpoint("before_overlay_setup");
     selectWindow("Original_RGB");
     run("Duplicate...", "title=Overlay_Combined");
+    selectWindow("Original_RGB");
+    run("Duplicate...", "title=Review_Detection_Overlay");
     newImage("Accepted_Objects_Mask", "8-bit black", width, height, 1);
     checkpoint("after_overlay_setup");
 }
@@ -249,7 +257,7 @@ for (i = 0; i < nObjects; i++) {
 
     File.append((i+1) + "," + d2s(area,0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "\n", allCsv);
 
-    roiStatus = "not_attempted"; roiArea = 0; roiDelta = 100; meanR = 0; meanG = 0; meanB = 0; objectPixels = 0; bluePixels = 0;
+    roiStatus = "not_attempted"; roiArea = 0; roiDelta = 100; meanR = 0; meanG = 0; meanB = 0; stdR = 0; stdG = 0; stdB = 0; minR = 0; minG = 0; minB = 0; maxR = 0; maxG = 0; maxB = 0; grayMean = 0; grayStd = 0; objectPixels = 0; bluePixels = 0;
     selectWindow(cellMaskTitle);
     recoverObjectRoi(xs[i], ys[i], bxs[i], bys[i], bws[i], bhs[i]);
     if (selectionType() == -1) {
@@ -271,9 +279,10 @@ for (i = 0; i < nObjects; i++) {
         } else {
             roiStatus = "ok";
         }
-        selectWindow(redTitle); run("Restore Selection"); getStatistics(areaR, meanR);
-        selectWindow(greenTitle); run("Restore Selection"); getStatistics(areaG, meanG);
-        selectWindow(blueTitle); run("Restore Selection"); getStatistics(areaB, meanB);
+        selectWindow(redTitle); run("Restore Selection"); getStatistics(areaR, meanR, minR, maxR, stdR);
+        selectWindow(greenTitle); run("Restore Selection"); getStatistics(areaG, meanG, minG, maxG, stdG);
+        selectWindow(blueTitle); run("Restore Selection"); getStatistics(areaB, meanB, minB, maxB, stdB);
+        selectWindow("Gray_Channel"); run("Restore Selection"); getStatistics(areaGray, grayMean, grayMin, grayMax, grayStd);
         selectWindow("Blue_Pixels_Mask"); run("Restore Selection");
         counts = countRoiPixelsInBbox(bxs[i], bys[i], bws[i], bhs[i]);
         objectPixels = counts[0];
@@ -281,13 +290,25 @@ for (i = 0; i < nObjects; i++) {
     }
 
     if (objectPixels > 0) fraction = bluePixels / objectPixels; else fraction = 0;
+    epsilon = 0.000001;
+    rOverG = meanR / maxOf(epsilon, meanG);
+    bOverR = meanB / maxOf(epsilon, meanR);
+    bOverRgbSum = meanB / maxOf(epsilon, meanR + meanG + meanB);
 
     if (accepted == 1) {
         acceptedCount++;
         totalAcceptedObjectPixels += objectPixels;
         totalAcceptedBluePixels += bluePixels;
+        acceptedRSum += meanR * objectPixels; acceptedGSum += meanG * objectPixels; acceptedBSum += meanB * objectPixels;
+        acceptedRSqSum += (stdR * stdR + meanR * meanR) * objectPixels;
+        acceptedGSqSum += (stdG * stdG + meanG * meanG) * objectPixels;
+        acceptedBSqSum += (stdB * stdB + meanB * meanB) * objectPixels;
+        acceptedBOverRSum += bOverR * objectPixels;
+        acceptedBOverRGBSumSum += bOverRgbSum * objectPixels;
+        acceptedGraySum += grayMean * objectPixels;
+        acceptedGraySqSum += (grayStd * grayStd + grayMean * grayMean) * objectPixels;
         objectType = classification;
-        File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + (i+1) + "," + objectType + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus + "\n", objectCsv);
+        File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + (i+1) + "," + objectType + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(stdR,3) + "," + d2s(stdG,3) + "," + d2s(stdB,3) + "," + d2s(minR,0) + "," + d2s(minG,0) + "," + d2s(minB,0) + "," + d2s(maxR,0) + "," + d2s(maxG,0) + "," + d2s(maxB,0) + "," + d2s(rOverG,6) + "," + d2s(bOverR,6) + "," + d2s(bOverRgbSum,6) + "," + d2s(grayMean,3) + "," + d2s(grayStd,3) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus + "\n", objectCsv);
         File.append(originalFileName + "," + groupName + "," + objectType + "," + (i+1) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "\n", blueCsv);
         if (saveOverlays == 1) {
             if (selectionType() != -1) {
@@ -305,13 +326,31 @@ for (i = 0; i < nObjects; i++) {
         if (selectionType() != -1) {
             shouldDrawObject = accepted;
             if (drawRejectedObjects == 1) shouldDrawObject = 1;
-            if (shouldDrawObject == 1) drawObjectOverlay(i+1, classification, area, accepted, fraction, bxs[i], bys[i]);
+            if (shouldDrawObject == 1) {
+                drawObjectOverlay(i+1, classification, area, accepted, fraction, bxs[i], bys[i]);
+                if (accepted == 1) drawReviewObjectOverlay(i+1, classification, fraction, bxs[i], bys[i], bws[i], bhs[i]);
+            }
         }
     }
 }
 checkpoint("after_per_object_loop");
 
-if (totalAcceptedObjectPixels > 0) acceptedFraction = totalAcceptedBluePixels / totalAcceptedObjectPixels; else acceptedFraction = 0;
+if (totalAcceptedObjectPixels > 0) {
+    acceptedFraction = totalAcceptedBluePixels / totalAcceptedObjectPixels;
+    acceptedRMean = acceptedRSum / totalAcceptedObjectPixels; acceptedGMean = acceptedGSum / totalAcceptedObjectPixels; acceptedBMean = acceptedBSum / totalAcceptedObjectPixels;
+    acceptedRStd = sqrt(maxOf(0, acceptedRSqSum / totalAcceptedObjectPixels - acceptedRMean * acceptedRMean));
+    acceptedGStd = sqrt(maxOf(0, acceptedGSqSum / totalAcceptedObjectPixels - acceptedGMean * acceptedGMean));
+    acceptedBStd = sqrt(maxOf(0, acceptedBSqSum / totalAcceptedObjectPixels - acceptedBMean * acceptedBMean));
+    acceptedBOverRMean = acceptedBOverRSum / totalAcceptedObjectPixels;
+    acceptedBOverRGBSumMean = acceptedBOverRGBSumSum / totalAcceptedObjectPixels;
+    acceptedGrayMean = acceptedGraySum / totalAcceptedObjectPixels;
+    acceptedGrayVariance = acceptedGraySqSum / totalAcceptedObjectPixels - acceptedGrayMean * acceptedGrayMean;
+    acceptedGrayStddev = sqrt(maxOf(0, acceptedGrayVariance));
+} else {
+    acceptedFraction = 0; acceptedRMean = 0; acceptedGMean = 0; acceptedBMean = 0; acceptedRStd = 0; acceptedGStd = 0; acceptedBStd = 0; acceptedBOverRMean = 0; acceptedBOverRGBSumMean = 0; acceptedGrayMean = 0; acceptedGrayStddev = 0;
+}
+acceptedAreaFractionOfFrame = totalAcceptedObjectPixels / framePixels;
+acceptedAreaPercentOfFrame = 100 * acceptedAreaFractionOfFrame;
 File.append(originalFileName + "," + groupName + ",all_accepted_cell_material,frame," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "\n", blueCsv);
 File.append(originalFileName + "," + groupName + ",all_cleaned_cell_material,frame," + d2s(whiteAfterMorphology,0) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "\n", blueCsv);
 
@@ -340,6 +379,12 @@ if (saveOverlays == 1) {
     selectWindow("Overlay_Combined");
     saveAs("Tiff", outputDir + "/final_analysis_overlay.tif");
     checkpoint("after_save_final_overlay");
+
+    checkpoint("before_save_review_overlay_preview");
+    saveReviewPreviewImage();
+    checkpoint("after_save_review_overlay_preview");
+    selectWindow("Review_Detection_Overlay");
+    saveAs("Tiff", outputDir + "/review_detection_overlay.tif");
 }
 
 lowAcceptedAreaWarning = 0;
@@ -352,8 +397,8 @@ if (roiWarningCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_ROI_RECONSTRU
 if (lowAcceptedAreaWarning == 1) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_AREA");
 
 summaryCsv = outputDir + "/final_frame_summary.csv";
-File.saveString("image_name,group_name,original_long_path,short_path_used,image_width,image_height,threshold_method,threshold_mode,background_rolling,median_radius,contrast_saturated,morph_open_iterations,morph_close_iterations,fill_holes,metadata_bar_height,particle_extract_min_area,particle_extract_max_area,min_noise_area,min_single_cell_area,max_single_cell_area,min_aggregate_area,max_aggregate_area,max_single_cell_aspect,max_aggregate_aspect,exclude_border_objects,border_margin_px,blue_min,blue_over_red,blue_over_green,min_stable_accepted_objects,min_stable_accepted_pixels,total_cell_material_pixels,cell_material_area_fraction,total_blue_pixels_in_cell_material,blue_pixel_fraction_all_cell_material,blue_pixel_percent_all_cell_material,component_count_total,accepted_object_count,single_cell_candidate_count,aggregate_candidate_count,too_small_noise_count,small_cell_or_fragment_count,too_large_artifact_count,too_long_artifact_count,border_object_count,roi_reconstruction_warning_count,accepted_object_pixels,accepted_blue_pixels,blue_pixel_fraction_all_accepted,blue_pixel_percent_all_accepted,components_area_ge_1,components_area_ge_5,components_area_ge_10,components_area_ge_20,components_area_ge_50,components_area_ge_100,components_area_ge_200,components_area_ge_500,qc_status\n", summaryCsv);
-summaryLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + width + "," + height + "," + thresholdMethod + "," + thresholdMode + "," + backgroundRolling + "," + medianRadius + "," + contrastSaturated + "," + morphOpenIterations + "," + morphCloseIterations + "," + boolText(fillHoles) + "," + metadataBarHeight + "," + particleExtractMinArea + "," + particleExtractMaxArea + "," + minNoiseArea + "," + minSingleCellArea + "," + maxSingleCellArea + "," + minAggregateArea + "," + maxAggregateArea + "," + maxSingleCellAspect + "," + maxAggregateAspect + "," + boolText(excludeBorderObjects) + "," + borderMarginPx + "," + blueMin + "," + blueOverRed + "," + blueOverGreen + "," + minStableAcceptedObjects + "," + minStableAcceptedPixels + "," + d2s(whiteAfterMorphology,0) + "," + d2s(whiteAfterMorphology/framePixels,8) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "," + nObjects + "," + acceptedCount + "," + singleCount + "," + aggregateCount + "," + tooSmallCount + "," + smallFragmentCount + "," + tooLargeCount + "," + tooLongCount + "," + borderCount + "," + roiWarningCount + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + componentsGe1 + "," + componentsGe5 + "," + componentsGe10 + "," + componentsGe20 + "," + componentsGe50 + "," + componentsGe100 + "," + componentsGe200 + "," + componentsGe500 + "," + qcStatus + "\n";
+File.saveString("image_name,group_name,original_long_path,short_path_used,image_width,image_height,threshold_method,threshold_mode,background_rolling,median_radius,contrast_saturated,morph_open_iterations,morph_close_iterations,fill_holes,metadata_bar_height,frame_area_pixels,accepted_area_fraction_of_frame,accepted_area_percent_of_frame,particle_extract_min_area,particle_extract_max_area,min_noise_area,min_single_cell_area,max_single_cell_area,min_aggregate_area,max_aggregate_area,max_single_cell_aspect,max_aggregate_aspect,exclude_border_objects,border_margin_px,blue_min,blue_over_red,blue_over_green,min_stable_accepted_objects,min_stable_accepted_pixels,total_cell_material_pixels,cell_material_area_fraction,total_blue_pixels_in_cell_material,blue_pixel_fraction_all_cell_material,blue_pixel_percent_all_cell_material,component_count_total,accepted_object_count,single_cell_candidate_count,aggregate_candidate_count,too_small_noise_count,small_cell_or_fragment_count,too_large_artifact_count,too_long_artifact_count,border_object_count,roi_reconstruction_warning_count,accepted_R_mean,accepted_G_mean,accepted_B_mean,accepted_R_std,accepted_G_std,accepted_B_std,accepted_B_over_R_mean,accepted_B_over_RGB_sum_mean,accepted_gray_stddev,accepted_object_pixels,accepted_blue_pixels,blue_pixel_fraction_all_accepted,blue_pixel_percent_all_accepted,components_area_ge_1,components_area_ge_5,components_area_ge_10,components_area_ge_20,components_area_ge_50,components_area_ge_100,components_area_ge_200,components_area_ge_500,qc_status\n", summaryCsv);
+summaryLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + width + "," + height + "," + thresholdMethod + "," + thresholdMode + "," + backgroundRolling + "," + medianRadius + "," + contrastSaturated + "," + morphOpenIterations + "," + morphCloseIterations + "," + boolText(fillHoles) + "," + metadataBarHeight + "," + d2s(framePixels,0) + "," + d2s(acceptedAreaFractionOfFrame,8) + "," + d2s(acceptedAreaPercentOfFrame,4) + "," + particleExtractMinArea + "," + particleExtractMaxArea + "," + minNoiseArea + "," + minSingleCellArea + "," + maxSingleCellArea + "," + minAggregateArea + "," + maxAggregateArea + "," + maxSingleCellAspect + "," + maxAggregateAspect + "," + boolText(excludeBorderObjects) + "," + borderMarginPx + "," + blueMin + "," + blueOverRed + "," + blueOverGreen + "," + minStableAcceptedObjects + "," + minStableAcceptedPixels + "," + d2s(whiteAfterMorphology,0) + "," + d2s(whiteAfterMorphology/framePixels,8) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "," + nObjects + "," + acceptedCount + "," + singleCount + "," + aggregateCount + "," + tooSmallCount + "," + smallFragmentCount + "," + tooLargeCount + "," + tooLongCount + "," + borderCount + "," + roiWarningCount + "," + d2s(acceptedRMean,3) + "," + d2s(acceptedGMean,3) + "," + d2s(acceptedBMean,3) + "," + d2s(acceptedRStd,3) + "," + d2s(acceptedGStd,3) + "," + d2s(acceptedBStd,3) + "," + d2s(acceptedBOverRMean,6) + "," + d2s(acceptedBOverRGBSumMean,6) + "," + d2s(acceptedGrayStddev,3) + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + componentsGe1 + "," + componentsGe5 + "," + componentsGe10 + "," + componentsGe20 + "," + componentsGe50 + "," + componentsGe100 + "," + componentsGe200 + "," + componentsGe500 + "," + qcStatus + "\n";
 File.append(summaryLine, summaryCsv);
 
 writeQcReport(qcStatus);
@@ -410,6 +455,48 @@ function drawObjectOverlay(id, classification, area, accepted, fraction, bx, by)
         drawString("#" + id + " " + classification + " blue=" + d2s(100*fraction,2) + "%", bx, maxOf(20, by-6));
     }
     run("Select None");
+}
+
+function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
+    selectWindow("Review_Detection_Overlay");
+    rectX = clampFloor(bx, 0, width - 1);
+    rectY = clampFloor(by, 0, height - 1);
+    rectW = maxOf(1, round(bw));
+    rectH = maxOf(1, round(bh));
+    if (rectX + rectW > width) rectW = width - rectX;
+    if (rectY + rectH > height) rectH = height - rectY;
+    makeRectangle(rectX, rectY, rectW, rectH);
+    setLineWidth(contourWidth);
+    setForegroundColor(255,255,0);
+    run("Draw", "slice");
+    if (labelObjects == 1) {
+        setFont("SansSerif", 18, "bold");
+        setColor(255,255,0);
+        drawString("#" + id, rectX, maxOf(20, rectY-6));
+    }
+    run("Select None");
+}
+
+function saveReviewPreviewImage() {
+    selectWindow("Review_Detection_Overlay");
+    run("Duplicate...", "title=Review_Overlay_Preview");
+    needsResize = 0;
+    if (previewMaxSize > 0) {
+        if (width > previewMaxSize) needsResize = 1;
+        if (height > previewMaxSize) needsResize = 1;
+    }
+    if (needsResize == 1) {
+        if (width >= height) {
+            newW = previewMaxSize;
+            newH = round(height * previewMaxSize / width);
+        } else {
+            newH = previewMaxSize;
+            newW = round(width * previewMaxSize / height);
+        }
+        run("Size...", "width=" + newW + " height=" + newH + " interpolation=Bilinear average");
+    }
+    saveAs("Jpeg", outputDir + "/review_detection_overlay_preview.jpg");
+    close();
 }
 
 function classifyObject(area, aspect, touchesBorder) {
@@ -513,6 +600,8 @@ function writeQcReport(qcStatus) {
     report += "- single_cell_candidate_count: " + singleCount + "\n";
     report += "- aggregate_candidate_count: " + aggregateCount + "\n";
     report += "- roi_reconstruction_warning_count: " + roiWarningCount + "\n";
+    report += "- frame_area_pixels: " + d2s(framePixels,0) + "\n";
+    report += "- accepted_area_percent_of_frame: " + d2s(acceptedAreaPercentOfFrame,4) + "\n";
     report += "- accepted_object_pixels: " + d2s(totalAcceptedObjectPixels,0) + "\n";
     report += "- accepted_blue_pixels: " + d2s(totalAcceptedBluePixels,0) + "\n";
     report += "- blue_pixel_percent_all_accepted: " + d2s(100*acceptedFraction,4) + "\n";
@@ -527,7 +616,7 @@ function writeQcReport(qcStatus) {
         report += "\n";
     }
     report += "## Notes\n\n";
-    report += "The measured feature is preliminary relative optical blue_pixel_fraction, not absolute iron concentration.\n";
+    report += "The measured feature is preliminary relative optical blue_pixel_fraction, not a calibrated concentration measurement.\n";
     report += "Bounding boxes are loop limits only; pixel membership is checked through selectionContains(x,y).\n";
     File.saveString(report, outputDir + "/extended_qc_report.md");
 }

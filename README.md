@@ -6,8 +6,8 @@ This project is intentionally small and conservative:
 
 - Fiji/ImageJ macro code performs the image processing.
 - Python is only a runner/wrapper for launching Fiji, passing parameters, creating clean output folders, checking outputs, and writing run metadata.
-- The project does **not** estimate absolute iron concentration.
-- The current target feature is a preliminary relative optical metric:
+- The project does **not** estimate calibrated material concentration.
+- The current target feature is a preliminary blue-pixel optical metric:
 
 ```text
 blue_pixel_fraction = blue_pixels / object_pixels
@@ -21,22 +21,28 @@ The active pipeline is still an MVP/work in progress.
 Current code has been cleaned so the normal run saves only essential artifacts:
 
 - one final visual overlay: `final_analysis_overlay.tif`
+- one review bounding-box overlay: `review_detection_overlay.tif`
 - component/object CSV files
-- image summary CSV
+- image summary CSV and PCA-ready frame feature CSV
+- blue-pixel CSV and review XLSX
 - run parameters
 - Fiji stdout/stderr
 - macro log
 
 Intermediate masks and debug overlays are intentionally not saved by default because the source frames are large, e.g. 4000x3000 pixels.
 
-Latest local test status:
+Current validation status should be checked on each workstation with the smoke-test commands below because raw microscopy inputs and Fiji are local-only and not committed.
 
-- Fiji launches correctly through `fiji.bat`.
-- Python creates a fresh output directory and rejects stale/incomplete outputs.
-- The macro opens the test image, builds the segmentation grayscale image, thresholds it, and reaches morphology.
-- The last test timed out after `morph_close`; final CSV/overlay output was not yet produced.
+## Output Contract
 
-So this repository currently captures the cleaned MVP codebase and the next debugging point, not a validated final analysis method.
+A successful single-frame run writes the existing baseline artifacts and these point-4 review/export artifacts:
+
+- `review_detection_overlay.tif`
+- `review_detection_overlay_preview.jpg`
+- `blue_pixels_features.xlsx`
+- `frame_features_for_pca.csv`
+
+The XLSX is a human-facing sorted copy of `blue_pixels_features.csv` with a final SUM row. The PCA-ready CSV is a one-row-per-run feature table; it does not perform PCA.
 
 ## Repository Layout
 
@@ -45,7 +51,6 @@ IronCells_MVP/
   macros/
     Main_IronCells_headless.ijm
   run_one_fiji_headless.py
-  run_one_fiji_headless.bat
   README.md
   .gitignore
 ```
@@ -62,22 +67,17 @@ output/
 - Windows
 - Fiji/ImageJ installed locally
 - Python 3.10+
+- Python package: `openpyxl`
 
-Current local Fiji runner path:
-
-```text
-C:\PERSONAL\ImageJ\Fiji\fiji.bat
-```
-
-If Fiji is installed elsewhere, pass `--fiji` to the runner.
+Pass the Fiji launcher path with `--fiji` or set `FIJI_PATH`. The runner also checks for `Fiji` / `Fiji.app` adjacent to or inside the project folder.
 
 ## Running One Image
 
 From the project folder:
 
 ```powershell
-cd C:\PERSONAL\ImageJ\IronCells_MVP
-.\run_one_fiji_headless.bat
+cd <repo>
+python run_one_fiji_headless.py --fiji <path-to-fiji-launcher>
 ```
 
 Or explicitly:

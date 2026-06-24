@@ -10,6 +10,7 @@ output/
 *.jpg
 *.jpeg
 *.csv
+*.xlsx
 
 # Keep source/control CSV-like files only if explicitly force-added later
 !README.md
