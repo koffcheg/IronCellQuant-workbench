@@ -121,20 +121,22 @@ checkpoint("after_split_rgb_channels");
 
 checkpoint("before_prepare_segmentation_gray");
 selectWindow("Original_RGB");
-run("Duplicate...", "title=Segmentation_Gray");
+run("Duplicate...", "title=SegmentationWork");
 run("8-bit");
 if (backgroundRolling > 0) run("Subtract Background...", "rolling=" + backgroundRolling);
 if (medianRadius > 0) run("Median...", "radius=" + medianRadius);
 if (contrastSaturated >= 0) run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
 checkpoint("after_prepare_segmentation_gray");
 
-selectWindow("Segmentation_Gray");
+selectWindow("SegmentationWork");
 checkpoint("before_set_auto_threshold");
 setAutoThreshold(thresholdMethod + " " + thresholdMode);
 checkpoint("after_set_auto_threshold");
 run("Convert to Mask");
 checkpoint("after_convert_segmentation_to_mask");
-cellMaskTitle = "Segmentation_Gray";
+rename("CellMaterialMask");
+cellMaskTitle = "CellMaterialMask";
+requireWindow(cellMaskTitle);
 
 selectWindow(cellMaskTitle);
 if (morphOpenIterations > 0) {
@@ -172,15 +174,15 @@ rename("Blue_Tmp_1");
 imageCalculator("AND create", "Blue_Tmp_1", "Blue_Minus_G");
 rename("Blue_Candidate_Mask");
 imageCalculator("AND create", "Blue_Candidate_Mask", cellMaskTitle);
-rename("Blue_Pixels_Mask");
-totalBluePixelsInMask = whiteCount("Blue_Pixels_Mask");
+rename("BlueInsideCells");
+totalBluePixelsInMask = whiteCount("BlueInsideCells");
 checkpoint("after_blue_mask_creation total_blue_pixels_in_cleaned_mask=" + totalBluePixelsInMask);
 
 checkpoint("before_analyze_particles");
 selectWindow(cellMaskTitle);
 run("Clear Results");
 run("Set Measurements...", "area centroid bounding fit shape mean redirect=None decimal=3");
-run("Analyze Particles...", "size=1-" + particleExtractMaxArea + " circularity=0.00-1.00 display clear");
+run("Analyze Particles...", "size=" + particleExtractMinArea + "-" + particleExtractMaxArea + " circularity=0.00-1.00 display clear");
 nObjects = nResults;
 checkpoint("after_analyze_particles component_count=" + nObjects);
 
@@ -224,9 +226,9 @@ File.saveString("image_name,group_name,object_type,object_id,object_pixels,blue_
 if (saveOverlays == 1) {
     checkpoint("before_overlay_setup");
     selectWindow("Original_RGB");
-    run("Duplicate...", "title=Overlay_Combined");
+    run("Duplicate...", "title=RoiOverlay");
     selectWindow("Original_RGB");
-    run("Duplicate...", "title=Review_Detection_Overlay");
+    run("Duplicate...", "title=ReviewDetectionOverlay");
     newImage("Accepted_Objects_Mask", "8-bit black", width, height, 1);
     checkpoint("after_overlay_setup");
 }
@@ -284,7 +286,7 @@ for (i = 0; i < nObjects; i++) {
         selectWindow(greenTitle); run("Restore Selection"); getStatistics(areaG, meanG, minG, maxG, stdG);
         selectWindow(blueTitle); run("Restore Selection"); getStatistics(areaB, meanB, minB, maxB, stdB);
         selectWindow("Gray_Channel"); run("Restore Selection"); getStatistics(areaGray, grayMean, grayMin, grayMax, grayStd);
-        selectWindow("Blue_Pixels_Mask"); run("Restore Selection");
+        selectWindow("BlueInsideCells"); run("Restore Selection");
         counts = countRoiPixelsInBbox(bxs[i], bys[i], bws[i], bhs[i]);
         objectPixels = counts[0];
         bluePixels = counts[1];
@@ -357,55 +359,61 @@ File.append(originalFileName + "," + groupName + ",all_accepted_cell_material,fr
 File.append(originalFileName + "," + groupName + ",all_cleaned_cell_material,frame," + d2s(whiteAfterMorphology,0) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "\n", blueCsv);
 
 if (saveOverlays == 1) {
-    checkpoint("before_save_stage1_masks");
-    selectWindow(cellMaskTitle);
+    checkpoint("before_save_cellmask");
+    requireWindow(cellMaskTitle);
+    run("Duplicate...", "title=CellMaterialMaskSave");
+    requireWindow("CellMaterialMaskSave");
     saveAs("Tiff", outputDir + "/cellmask.tif");
-    selectWindow("Original_RGB");
-    run("Duplicate...", "title=Cell_Pixels_Visualization");
-    selectWindow(cellMaskTitle);
+    close();
+    requireWindow(cellMaskTitle);
+    checkpoint("after_save_cellmask");
+
+    checkpoint("before_save_vis_cellpixels");
+    requireWindow("Original_RGB");
+    run("Duplicate...", "title=VisCellPixels");
+    requireWindow(cellMaskTitle);
     run("Create Selection");
     if (selectionType() != -1) {
-        selectWindow("Cell_Pixels_Visualization");
+        requireWindow("VisCellPixels");
         run("Restore Selection");
         setForegroundColor(255,0,255);
         run("Fill", "slice");
         run("Select None");
     }
+    requireWindow("VisCellPixels");
     saveAs("Png", outputDir + "/vis_cellpixels.png");
-    selectWindow("Blue_Pixels_Mask");
-    saveAs("Tiff", outputDir + "/blue_inside_cells.tif");
-    checkpoint("after_save_stage1_masks");
+    checkpoint("after_save_vis_cellpixels");
 }
 
 if (saveOverlays == 1) {
+    checkpoint("before_save_blue_inside_cells");
+    requireWindow("BlueInsideCells");
+    run("Duplicate...", "title=BlueInsideCellsSave");
+    requireWindow("BlueInsideCellsSave");
+    saveAs("Tiff", outputDir + "/blue_inside_cells.tif");
+    close();
+    requireWindow("BlueInsideCells");
+    checkpoint("after_save_blue_inside_cells");
+
     checkpoint("before_final_overlay_blue_layer");
-    imageCalculator("AND create", "Blue_Pixels_Mask", "Accepted_Objects_Mask");
-    rename("Blue_Accepted_Mask");
-    selectWindow("Blue_Accepted_Mask");
+    requireWindow("BlueInsideCells");
+    requireWindow("Accepted_Objects_Mask");
+    imageCalculator("AND create", "BlueInsideCells", "Accepted_Objects_Mask");
+    rename("BlueAcceptedMask");
+    requireWindow("BlueAcceptedMask");
     run("Create Selection");
     if (selectionType() != -1) {
-        selectWindow("Overlay_Combined");
+        requireWindow("RoiOverlay");
         run("Restore Selection");
         setForegroundColor(0,80,255);
         run("Fill", "slice");
         run("Select None");
     }
-    // Create the lightweight preview before saveAs(Tiff).
-    // In Fiji headless, saveAs can retitle the active image to the saved filename,
-    // so selecting the old window title after saveAs is not reliable.
-    checkpoint("before_save_final_overlay_preview");
-    selectWindow("Overlay_Combined");
-    savePreviewImage();
-    checkpoint("after_save_final_overlay_preview");
 
-    checkpoint("before_save_final_overlay");
-    selectWindow("Overlay_Combined");
+    checkpoint("before_save_roi_overlay");
+    requireWindow("RoiOverlay");
     saveAs("Jpeg", outputDir + "/roi_overlay.jpg");
-    checkpoint("after_save_final_overlay");
-
-    checkpoint("before_save_review_overlay_preview");
-    saveReviewPreviewImage();
-    checkpoint("after_save_review_overlay_preview");
+    checkpoint("after_save_roi_overlay");
 }
 
 lowAcceptedAreaWarning = 0;
@@ -469,7 +477,7 @@ function countRoiPixelsInBbox(bx, by, bw, bh) {
 
 function drawObjectOverlay(id, classification, area, accepted, fraction, bx, by) {
     if (accepted == 1) { rr=0; gg=255; bb=0; } else { rr=255; gg=120; bb=0; }
-    selectWindow("Overlay_Combined");
+    requireWindow("RoiOverlay");
     run("Restore Selection");
     setLineWidth(contourWidth); setForegroundColor(rr,gg,bb); run("Draw", "slice");
     if (labelObjects == 1) {
@@ -480,7 +488,7 @@ function drawObjectOverlay(id, classification, area, accepted, fraction, bx, by)
 }
 
 function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
-    selectWindow("Review_Detection_Overlay");
+    requireWindow("ReviewDetectionOverlay");
     rectX = clampFloor(bx, 0, width - 1);
     rectY = clampFloor(by, 0, height - 1);
     rectW = maxOf(1, round(bw));
@@ -500,7 +508,7 @@ function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
 }
 
 function saveReviewPreviewImage() {
-    selectWindow("Review_Detection_Overlay");
+    requireWindow("ReviewDetectionOverlay");
     run("Duplicate...", "title=Review_Overlay_Preview");
     needsResize = 0;
     if (previewMaxSize > 0) {
@@ -593,7 +601,7 @@ function whiteCount(title) {
 }
 
 function savePreviewImage() {
-    selectWindow("Overlay_Combined");
+    requireWindow("RoiOverlay");
     run("Duplicate...", "title=Overlay_Preview");
     needsResize = 0;
     if (previewMaxSize > 0) {
@@ -650,6 +658,23 @@ function writeQcReport(qcStatus) {
     File.saveString(report, outputDir + "/extended_qc_report.md");
 }
 
+
+function windowExists(title) {
+    titles = getList("image.titles");
+    for (wi = 0; wi < titles.length; wi++) {
+        if (titles[wi] == title) return 1;
+    }
+    return 0;
+}
+
+function requireWindow(title) {
+    if (windowExists(title) == 0) {
+        message = "ERROR required ImageJ window missing: " + title;
+        logLine(message);
+        exit(message);
+    }
+    selectWindow(title);
+}
 
 function appendQcStatus(currentStatus, warningStatus) {
     if (currentStatus == "PASS") return warningStatus;
