@@ -454,6 +454,11 @@ def mask_array_stats(array: Any, path: Path) -> dict[str, int]:
     if len(shape) == 3:
         array = array[..., 0]
     height, width = array.shape[:2]
+    unique_values = set()
+    for value in array.flat:
+        unique_values.add(int(value))
+        if len(unique_values) > 2:
+            raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
     nonzero = int((array != 0).sum())
     bits = int(getattr(array.dtype, "itemsize", 1) * 8)
     return {"width": int(width), "height": int(height), "nonzero": nonzero, "samples": 1, "bits": bits}
@@ -483,7 +488,14 @@ def read_tiff_mask_stats_with_pillow(path: Path) -> dict[str, int]:
         bits = image.tag_v2.get(258, 8)
         if isinstance(bits, tuple):
             bits = bits[0]
-        nonzero = sum(1 for value in image.getdata() if value != 0)
+        unique_values = set()
+        nonzero = 0
+        for value in image.getdata():
+            unique_values.add(int(value))
+            if len(unique_values) > 2:
+                raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
+            if value != 0:
+                nonzero += 1
     return {"width": width, "height": height, "nonzero": nonzero, "samples": samples, "bits": int(bits)}
 
 
@@ -519,12 +531,23 @@ def read_uncompressed_tiff_mask_stats(path: Path) -> dict[str, int]:
     if not strip_offset or not strip_count:
         raise ValueError(f"TIFF mask is missing strip offsets/counts: {path}")
     pixels = data[strip_offset:strip_offset + strip_count]
+    unique_values = set()
     if bits == 8:
-        nonzero = sum(1 for value in pixels if value != 0)
+        nonzero = 0
+        for value in pixels:
+            unique_values.add(int(value))
+            if len(unique_values) > 2:
+                raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
+            if value != 0:
+                nonzero += 1
     elif bits == 16:
         nonzero = 0
         for i in range(0, len(pixels), 2):
-            if int.from_bytes(pixels[i:i+2], endian) != 0:
+            value = int.from_bytes(pixels[i:i+2], endian)
+            unique_values.add(value)
+            if len(unique_values) > 2:
+                raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
+            if value != 0:
                 nonzero += 1
     else:
         raise ValueError(f"Unsupported TIFF mask bit depth {bits}: {path}")
