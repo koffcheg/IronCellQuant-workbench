@@ -132,8 +132,9 @@ checkpoint("before_prepare_segmentation_gray");
 if (wekaModelPath != "") {
     checkpoint("before_weka_prediction");
     runWekaPrediction(wekaModelPath);
+    if (wekaFailureStatus == "") ensureWekaCellMaskWindow();
     if (wekaFailureStatus != "") {
-        logLine(wekaFailureStatus + ": Fiji Trainable Weka Segmentation is required for --weka-model runs.");
+        logLine(wekaFailureStatus + ": Weka tile inference did not produce a usable stitched cell-material mask.");
         newImage("CellMaterialMask", "8-bit black", width, height, 1);
         cellMaskTitle = "CellMaterialMask";
     } else {
@@ -722,7 +723,7 @@ function writeQcReport(qcStatus) {
     report += "- min_stable_accepted_pixels: " + minStableAcceptedPixels + "\n\n";
     if (qcStatus != "PASS") {
         report += "## Warnings\n\n";
-        if (wekaFailureStatus != "") report += "- " + wekaFailureStatus + ": Fiji Trainable Weka Segmentation is required for --weka-model runs.\n";
+        if (wekaFailureStatus != "") report += "- " + wekaFailureStatus + ": Weka tile inference did not produce a usable stitched cell-material mask.\n";
         if (acceptedCount == 0) {
             report += "- FAIL_NO_ACCEPTED_OBJECTS: Stage 1A detector found no accepted biological ROI/cell-material regions.\n";
             if (borderCount > 0) report += "- Only rejected border/annotation artifact candidates were detected in this run; they are not reported as biological ROIs.\n";
@@ -750,6 +751,7 @@ function runWekaPrediction(modelPath) {
     script += "var IJ = Packages.ij.IJ;\n";
     script += "var WM = Packages.ij.WindowManager;\n";
     script += "var FileWriter = Packages.java.io.FileWriter;\n";
+    script += "function ck(name) { var fw = new FileWriter('" + jsPath(logPath) + "', true); fw.write('CHECKPOINT ' + name + '\\n'); fw.close(); }\n";
     script += "try {\n";
     script += "  var WekaSegmentation = Packages.trainableSegmentation.WekaSegmentation;\n";
     script += "  var Roi = Packages.ij.gui.Roi;\n";
@@ -764,7 +766,8 @@ function runWekaPrediction(modelPath) {
     script += "  if (overlap * 2 >= tileSize) overlap = Math.floor(tileSize / 4);\n";
     script += "  var step = tileSize - 2 * overlap; if (step < 64) step = tileSize;\n";
     script += "  var full = new ByteProcessor(w, h);\n";
-    script += "  var savedFirstProbability = false;\n";
+    script += "  var savedFirstProbability = false; var tileCount = 0;\n";
+    script += "  ck('before_first_weka_tile');\n";
     script += "  for (var y = 0; y < h; y += step) {\n";
     script += "    for (var x = 0; x < w; x += step) {\n";
     script += "      var tw = Math.min(tileSize, w - x); var th = Math.min(tileSize, h - y);\n";
@@ -784,12 +787,16 @@ function runWekaPrediction(modelPath) {
     script += "          if (proc.getf(xx, yy) >= threshold) full.set(x + xx, y + yy, 255);\n";
     script += "        }\n";
     script += "      }\n";
+    script += "      tileCount++; if (tileCount % 10 == 0) ck('after_weka_tile_' + tileCount);\n";
     script += "      tile.close(); probability.close();\n";
     script += "    }\n";
     script += "  }\n";
+    script += "  ck('after_weka_tile_count_' + tileCount);\n";
     script += "  imp.killRoi();\n";
+    script += "  ck('after_weka_stitching');\n";
     script += "  var mask = new ImagePlus('WekaCellMaskRaw', full);\n";
     script += "  mask.show();\n";
+    script += "  ck('after_create_WekaCellMaskRaw');\n";
     script += "  IJ.saveAs(mask, 'Tiff', '" + jsPath(tileMaskPath) + "');\n";
     script += "  IJ.saveAs(mask, 'Tiff', '" + jsPath(classMapPath) + "');\n";
     script += "  var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('OK'); fw.close();\n";
@@ -801,6 +808,23 @@ function runWekaPrediction(modelPath) {
     } else {
         wekaFailureStatus = "FAIL_WEKA_PLUGIN_UNAVAILABLE";
     }
+}
+
+function ensureWekaCellMaskWindow() {
+    if (windowExists("WekaCellMaskRaw")) {
+        checkpoint("after_create_WekaCellMaskRaw");
+        return;
+    }
+    tileMaskPath = outputDir + "/debug_weka_tile_mask_raw.tif";
+    if (File.exists(tileMaskPath)) {
+        checkpoint("before_open_stitched_weka_mask");
+        open(tileMaskPath);
+        rename("WekaCellMaskRaw");
+        checkpoint("after_create_WekaCellMaskRaw");
+        return;
+    }
+    wekaFailureStatus = "FAIL_WEKA_MASK_MISSING";
+    logLine("FAIL_WEKA_MASK_MISSING: Weka status was OK, but no WekaCellMaskRaw window or stitched mask file was found.");
 }
 
 function jsPath(pathValue) {

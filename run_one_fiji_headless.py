@@ -751,7 +751,14 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     else:
         missing, stale, empty = validate_expected_outputs(output, params, started)
 
-    if returncode == 0 and not missing and not stale and not empty:
+    if weka_model is not None and returncode == 0 and (missing or empty):
+        status = "FAIL_WEKA_MASK_MISSING" if "WekaCellMaskRaw" in (stdout + stderr) or "FAIL_WEKA_MASK_MISSING" in (stdout + stderr) else "FAIL_WEKA_TILE_INFERENCE"
+        detail = f"Weka tile inference ended without the required macro outputs. last_checkpoint={read_last_checkpoint(output)}; missing_outputs={';'.join(missing)}; empty_outputs={';'.join(empty)}; tile_size={macro_params.get('weka_tile_size')}; tile_overlap={macro_params.get('weka_tile_overlap')}"
+        write_weka_failure_outputs(output, image, image.stem, weka_model, macro_params, status, detail)
+        postprocess_error = status
+        missing, stale, empty = validate_named_outputs(output, final_expected_outputs(params, image.stem), started)
+
+    if returncode == 0 and not missing and not stale and not empty and not postprocess_error:
         try:
             postprocess_outputs(output, image.stem, image, params)
         except Exception as exc:
