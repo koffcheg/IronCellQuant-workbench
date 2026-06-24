@@ -25,12 +25,12 @@ morphCloseIterations = parseFloat(getArgString(arg, "morph_close_iterations", "2
 fillHoles = getArgBool(arg, "fill_holes", 1);
 metadataBarHeight = parseFloat(getArgString(arg, "metadata_bar_height", "120"));
 
-particleExtractMinArea = parseFloat(getArgString(arg, "particle_extract_min_area", "40"));
+particleExtractMinArea = parseFloat(getArgString(arg, "particle_extract_min_area", "100"));
 particleExtractMaxArea = parseFloat(getArgString(arg, "particle_extract_max_area", "2000000"));
-minNoiseArea = parseFloat(getArgString(arg, "min_noise_area", "40"));
-minSingleCellArea = parseFloat(getArgString(arg, "min_single_cell_area", "100"));
-maxSingleCellArea = parseFloat(getArgString(arg, "max_single_cell_area", "2500"));
-minAggregateArea = parseFloat(getArgString(arg, "min_aggregate_area", "2500"));
+minNoiseArea = parseFloat(getArgString(arg, "min_noise_area", "100"));
+minSingleCellArea = parseFloat(getArgString(arg, "min_single_cell_area", "200"));
+maxSingleCellArea = parseFloat(getArgString(arg, "max_single_cell_area", "3000"));
+minAggregateArea = parseFloat(getArgString(arg, "min_aggregate_area", "3000"));
 maxAggregateArea = parseFloat(getArgString(arg, "max_aggregate_area", "2000000"));
 maxSingleCellAspect = parseFloat(getArgString(arg, "max_single_cell_aspect", "4"));
 maxAggregateAspect = parseFloat(getArgString(arg, "max_aggregate_aspect", "8"));
@@ -48,7 +48,7 @@ contourWidth = parseFloat(getArgString(arg, "contour_width", "6"));
 previewMaxSize = parseFloat(getArgString(arg, "final_overlay_preview_max_size", "1600"));
 minExpectedAcceptedObjects = parseFloat(getArgString(arg, "min_expected_accepted_objects", "1"));
 minStableAcceptedObjects = parseFloat(getArgString(arg, "min_stable_accepted_objects", "3"));
-maxStableAcceptedObjects = parseFloat(getArgString(arg, "max_stable_accepted_objects", "80"));
+maxStableAcceptedObjects = parseFloat(getArgString(arg, "max_stable_accepted_objects", "40"));
 minStableAcceptedPixels = parseFloat(getArgString(arg, "min_stable_accepted_pixels", "500"));
 
 File.makeDirectory(outputDir);
@@ -122,24 +122,34 @@ checkpoint("after_split_rgb_channels");
 
 checkpoint("before_prepare_segmentation_gray");
 selectWindow("Original_RGB");
-run("Duplicate...", "title=SegmentationWork");
+run("Duplicate...", "title=SegmentationBase");
 run("8-bit");
 if (backgroundRolling > 0) run("Subtract Background...", "rolling=" + backgroundRolling);
 if (medianRadius > 0) run("Median...", "radius=" + medianRadius);
+if (contrastSaturated >= 0) run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
+
+requireWindow("SegmentationBase");
+run("Duplicate...", "title=TextureEvidence");
+run("Variance...", "radius=3");
+if (contrastSaturated >= 0) run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
+setAutoThreshold(thresholdMethod + " bright");
+run("Convert to Mask");
+rename("TextureEvidenceMask");
+
+requireWindow("SegmentationBase");
+run("Duplicate...", "title=EdgeEvidence");
 run("Find Edges");
 run("Gaussian Blur...", "sigma=1");
 if (contrastSaturated >= 0) run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
-checkpoint("after_prepare_segmentation_gray_structural_map");
-
-selectWindow("SegmentationWork");
-checkpoint("before_set_auto_threshold");
-setAutoThreshold(thresholdMethod + " " + thresholdMode);
-checkpoint("after_set_auto_threshold");
+setAutoThreshold(thresholdMethod + " bright");
 run("Convert to Mask");
-checkpoint("after_convert_segmentation_to_mask");
+rename("EdgeEvidenceMask");
+
+imageCalculator("AND create", "TextureEvidenceMask", "EdgeEvidenceMask");
 rename("CellMaterialMask");
 cellMaskTitle = "CellMaterialMask";
 requireWindow(cellMaskTitle);
+checkpoint("after_prepare_stage1a_texture_contrast_candidate_mask");
 
 selectWindow(cellMaskTitle);
 if (morphOpenIterations > 0) {
@@ -256,7 +266,8 @@ for (i = 0; i < nObjects; i++) {
     area = areas[i];
     aspect = maxOf(bws[i], bhs[i]) / maxOf(1, minOf(bws[i], bhs[i]));
     touchesBorder = objectTouchesBorder(bxs[i], bys[i], bws[i], bhs[i]);
-    classification = classifyObject(area, aspect, touchesBorder);
+    fillRatio = area / maxOf(1, bws[i] * bhs[i]);
+    classification = classifyObject(area, aspect, touchesBorder, fillRatio);
     rejectReason = rejectReasonFor(classification, area);
     accepted = isAcceptedClass(classification);
 
@@ -268,13 +279,14 @@ for (i = 0; i < nObjects; i++) {
     if (area >= 100) componentsGe100++;
     if (area >= 200) componentsGe200++;
     if (area >= 500) componentsGe500++;
-    if (classification == "too_small_noise") tooSmallCount++;
+    if (classification == "too_small") tooSmallCount++;
     if (classification == "small_cell_or_fragment") smallFragmentCount++;
     if (classification == "cell_region_candidate") smallFragmentCount++;
     if (classification == "single_cell_candidate") singleCount++;
     if (classification == "aggregate_candidate") aggregateCount++;
     if (classification == "too_large_artifact") tooLargeCount++;
     if (classification == "too_long_artifact") tooLongCount++;
+    if (classification == "rectangle_or_line_artifact") tooLongCount++;
     if (classification == "border_object") borderCount++;
 
     File.append((i+1) + "," + d2s(area,0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "\n", allCsv);
@@ -562,33 +574,33 @@ function outputObjectType(classification) {
     return classification;
 }
 
-function classifyObject(area, aspect, touchesBorder) {
+function classifyObject(area, aspect, touchesBorder, fillRatio) {
     if (excludeBorderObjects == 1) {
         if (touchesBorder == 1) return "border_object";
     }
-    if (area < particleExtractMinArea) return "too_small_noise";
-    if (area < minNoiseArea) return "too_small_noise";
-    if (area < minSingleCellArea) return "small_cell_or_fragment";
-    if (area > maxAggregateArea) return "too_large_artifact";
+    if (area < particleExtractMinArea) return "too_small";
+    if (area < minNoiseArea) return "too_small";
+    if (area < minSingleCellArea) return "too_small";
+    if (fillRatio < 0.12) return "rectangle_or_line_artifact";
+    if (area > maxAggregateArea) return "background_texture";
     if (area <= maxSingleCellArea) {
-        if (aspect > maxSingleCellAspect) return "too_long_artifact";
+        if (aspect > maxSingleCellAspect) return "rectangle_or_line_artifact";
         if (area < 500) return "cell_region_candidate";
         return "single_cell_candidate";
     }
     if (area >= minAggregateArea) {
         if (area <= maxAggregateArea) {
-            if (aspect > maxAggregateAspect) return "too_long_artifact";
+            if (aspect > maxAggregateAspect) return "rectangle_or_line_artifact";
             return "aggregate_candidate";
         }
     }
-    return "small_cell_or_fragment";
+    return "uncertain_or_artifact";
 }
 
 function rejectReasonFor(classification, area) {
     if (isAcceptedClass(classification) == 1) return "";
-    if (classification == "too_small_noise") {
-        if (area < particleExtractMinArea) return "below_particle_extract_min_area";
-    }
+    if (classification == "too_small") return "too_small";
+    if (classification == "border_object") return "border_artifact";
     return classification;
 }
 

@@ -56,12 +56,12 @@ DEFAULT_PARAMS = {
     "morph_close_iterations": "2",
     "fill_holes": "true",
     "metadata_bar_height": "120",
-    "particle_extract_min_area": "40",
+    "particle_extract_min_area": "100",
     "particle_extract_max_area": "2000000",
-    "min_noise_area": "40",
-    "min_single_cell_area": "100",
-    "max_single_cell_area": "2500",
-    "min_aggregate_area": "2500",
+    "min_noise_area": "100",
+    "min_single_cell_area": "200",
+    "max_single_cell_area": "3000",
+    "min_aggregate_area": "3000",
     "max_aggregate_area": "2000000",
     "max_single_cell_aspect": "4",
     "max_aggregate_aspect": "8",
@@ -77,7 +77,7 @@ DEFAULT_PARAMS = {
     "final_overlay_preview_max_size": "1600",
     "min_expected_accepted_objects": "1",
     "min_stable_accepted_objects": "3",
-    "max_stable_accepted_objects": "80",
+    "max_stable_accepted_objects": "40",
     "min_stable_accepted_pixels": "500",
 }
 
@@ -465,11 +465,16 @@ def copy_final_named_outputs(output: Path, image_stem: str) -> None:
 def move_internal_outputs(output: Path) -> None:
     internal = output / "_internal"
     internal.mkdir(exist_ok=True)
-    internal_names = [name for name in ALWAYS_EXPECTED_OUTPUTS if name not in RUNNER_WRITTEN_OUTPUTS]
-    for name in set(internal_names + OVERLAY_EXPECTED_OUTPUTS + ["blue_table.xlsx", "fiji_stdout.txt", "fiji_stderr.txt", "runner_command.txt"]):
+    for name in set(ALWAYS_EXPECTED_OUTPUTS + OVERLAY_EXPECTED_OUTPUTS + ["blue_table.xlsx", "fiji_stdout.txt", "fiji_stderr.txt", "runner_command.txt", "fiji_work"]):
         source = output / name
         if source.exists():
-            shutil.move(str(source), str(internal / name))
+            target = internal / name
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            shutil.move(str(source), str(target))
 
 
 def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
@@ -489,6 +494,8 @@ def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) 
 
 def read_last_checkpoint(output: Path) -> str:
     log_path = output / "macro_log.txt"
+    if not log_path.exists():
+        log_path = output / "_internal" / "macro_log.txt"
     if not log_path.exists():
         return ""
     last = ""
