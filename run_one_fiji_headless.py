@@ -14,11 +14,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ALWAYS_EXPECTED_OUTPUTS = [
     "all_components_before_filter.csv",
     "rejected_objects.csv",
-    "final_object_report.csv",
+    "cell_features.csv",
     "blue_pixels_features.csv",
-    "blue_pixels_features.xlsx",
-    "final_frame_summary.csv",
-    "frame_features_for_pca.csv",
+    "blue_table.xlsx",
+    "frame_features.csv",
     "extended_qc_report.md",
     "run_parameters.txt",
     "run_parameters.csv",
@@ -26,11 +25,21 @@ ALWAYS_EXPECTED_OUTPUTS = [
 ]
 
 OVERLAY_EXPECTED_OUTPUTS = [
-    "final_analysis_overlay.tif",
-    "final_analysis_overlay_preview.jpg",
-    "review_detection_overlay.tif",
-    "review_detection_overlay_preview.jpg",
+    "cellmask.tif",
+    "vis_cellpixels.png",
+    "roi_overlay.jpg",
+    "blue_inside_cells.tif",
 ]
+
+FINAL_OUTPUT_MAP = {
+    "cellmask.tif": "cellmask_{image_name}.tif",
+    "vis_cellpixels.png": "vis_cellpixels_{image_name}.png",
+    "roi_overlay.jpg": "roi_overlay_{image_name}.jpg",
+    "blue_inside_cells.tif": "blue_inside_cells_{image_name}.tif",
+    "blue_table.xlsx": "blue_table_{image_name}.xlsx",
+    "cell_features.csv": "cell_features_{image_name}.csv",
+    "frame_features.csv": "frame_features_{image_name}.csv",
+}
 
 DEFAULT_PARAMS = {
     "threshold_method": "Li",
@@ -108,10 +117,23 @@ def discover_default_input(project: Path) -> Path:
     return project / "input" / "52_proto1.bmp"
 
 
-def expected_outputs(params: dict[str, str]) -> list[str]:
+def expected_outputs(params: dict[str, str], image_name: str | None = None) -> list[str]:
     outputs = list(ALWAYS_EXPECTED_OUTPUTS)
+    if image_name:
+        outputs.extend([
+            f"blue_table_{image_name}.xlsx",
+            f"cell_features_{image_name}.csv",
+            f"frame_features_{image_name}.csv",
+        ])
     if bool_param(params.get("save_overlays", "true")):
         outputs.extend(OVERLAY_EXPECTED_OUTPUTS)
+        if image_name:
+            outputs.extend([
+                f"cellmask_{image_name}.tif",
+                f"vis_cellpixels_{image_name}.png",
+                f"roi_overlay_{image_name}.jpg",
+                f"blue_inside_cells_{image_name}.tif",
+            ])
     return outputs
 
 
@@ -178,7 +200,7 @@ def build_macro_arg(image: Path, output: Path, project: Path, params: dict[str, 
 
 
 def write_run_parameters(output: Path, project: Path, image: Path, fiji: Path, macro: Path, macro_arg: str, params: dict[str, str]) -> None:
-    outputs = expected_outputs(params)
+    outputs = expected_outputs(params, image.name)
     lines = [
         f"project={project}",
         f"input={image}",
@@ -214,11 +236,11 @@ def read_single_csv_row(path: Path) -> dict[str, str]:
     return rows[0] if rows else {}
 
 
-def validate_expected_outputs(output: Path, params: dict[str, str], started: datetime) -> tuple[list[str], list[str], list[str]]:
+def validate_expected_outputs(output: Path, params: dict[str, str], started: datetime, image_name: str | None = None) -> tuple[list[str], list[str], list[str]]:
     missing: list[str] = []
     stale: list[str] = []
     empty: list[str] = []
-    for name in expected_outputs(params):
+    for name in expected_outputs(params, image_name):
         path = output / name
         if not path.exists():
             missing.append(name)
@@ -238,7 +260,15 @@ def write_blue_pixels_xlsx(output: Path) -> None:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
 
-    object_rows = [row for row in rows if row.get("object_id") != "frame"]
+    object_rows = [
+        row for row in rows
+        if row.get("object_id") != "frame" and not row.get("object_type", "").startswith("all_")
+    ]
+    for row in object_rows:
+        object_pixels = float(row.get("object_pixels") or 0)
+        blue_pixels = float(row.get("blue_pixels") or 0)
+        if blue_pixels > object_pixels:
+            raise ValueError(f"blue_pixels exceeds object_pixels for object_id={row.get('object_id')}")
     object_rows.sort(key=lambda row: float(row.get("blue_pixel_percent") or 0), reverse=True)
     columns = [
         "image_name",
@@ -286,7 +316,7 @@ def write_blue_pixels_xlsx(output: Path) -> None:
     for row in worksheet.iter_rows(min_row=2, min_col=7, max_col=8):
         row[0].number_format = "0.00000000"
         row[1].number_format = "0.0000"
-    workbook.save(output / "blue_pixels_features.xlsx")
+    workbook.save(output / "blue_table.xlsx")
 
 
 def coerce_cell(value: str) -> Any:
@@ -301,8 +331,8 @@ def coerce_cell(value: str) -> Any:
     return number
 
 
-def write_frame_features_for_pca(output: Path) -> None:
-    summary = read_single_csv_row(output / "final_frame_summary.csv")
+def write_frame_features(output: Path) -> None:
+    summary = read_single_csv_row(output / "frame_features.csv")
     fieldnames = [
         "image_name", "width", "height", "frame_area_pixels", "component_count_total",
         "accepted_object_count", "accepted_object_pixels", "accepted_area_fraction_of_frame",
@@ -334,15 +364,23 @@ def write_frame_features_for_pca(output: Path) -> None:
         "accepted_gray_stddev": summary.get("accepted_gray_stddev", ""),
         "qc_status": summary.get("qc_status", ""),
     }
-    with (output / "frame_features_for_pca.csv").open("w", encoding="utf-8-sig", newline="") as f:
+    with (output / "frame_features.csv").open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerow(row)
 
 
-def postprocess_outputs(output: Path) -> None:
+def copy_final_named_outputs(output: Path, image_name: str) -> None:
+    for source_name, target_template in FINAL_OUTPUT_MAP.items():
+        source = output / source_name
+        if source.exists():
+            shutil.copy2(source, output / target_template.format(image_name=image_name))
+
+
+def postprocess_outputs(output: Path, image_name: str) -> None:
     write_blue_pixels_xlsx(output)
-    write_frame_features_for_pca(output)
+    copy_final_named_outputs(output, image_name)
+    # frame_features.csv is written by the macro; no PCA file is produced in Stage 1.
 
 def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) -> None:
     with (output / "macro_log.txt").open("a", encoding="utf-8", errors="replace") as f:
@@ -389,9 +427,9 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     append_runner_parameters_to_macro_log(output, params)
 
     if returncode == 0:
-        postprocess_outputs(output)
+        postprocess_outputs(output, image.name)
 
-    missing, stale, empty = validate_expected_outputs(output, params, started)
+    missing, stale, empty = validate_expected_outputs(output, params, started, image.name)
 
     last_checkpoint = read_last_checkpoint(output)
     ok = returncode == 0 and not missing and not stale and not empty
