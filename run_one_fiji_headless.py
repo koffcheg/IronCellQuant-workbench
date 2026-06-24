@@ -56,10 +56,10 @@ DEFAULT_PARAMS = {
     "morph_close_iterations": "1",
     "fill_holes": "true",
     "metadata_bar_height": "120",
-    "particle_extract_min_area": "10",
+    "particle_extract_min_area": "40",
     "particle_extract_max_area": "2000000",
-    "min_noise_area": "10",
-    "min_single_cell_area": "40",
+    "min_noise_area": "40",
+    "min_single_cell_area": "100",
     "max_single_cell_area": "50000",
     "min_aggregate_area": "50000",
     "max_aggregate_area": "2000000",
@@ -139,6 +139,22 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
                 f"roi_overlay_{image_stem}.jpg",
                 f"blue_inside_cells_{image_stem}.tif",
             ])
+    return outputs
+
+
+def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]:
+    outputs = [
+        f"blue_table_{image_stem}.xlsx",
+        f"cell_features_{image_stem}.csv",
+        f"frame_features_{image_stem}.csv",
+    ]
+    if bool_param(params.get("save_overlays", "true")):
+        outputs.extend([
+            f"cellmask_{image_stem}.tif",
+            f"vis_cellpixels_{image_stem}.png",
+            f"roi_overlay_{image_stem}.jpg",
+            f"blue_inside_cells_{image_stem}.tif",
+        ])
     return outputs
 
 
@@ -273,6 +289,21 @@ def validate_expected_outputs(output: Path, params: dict[str, str], started: dat
     return missing, stale, empty
 
 
+def validate_named_outputs(output: Path, names: list[str], started: datetime) -> tuple[list[str], list[str], list[str]]:
+    missing: list[str] = []
+    stale: list[str] = []
+    empty: list[str] = []
+    for name in names:
+        path = output / name
+        if not path.exists():
+            missing.append(name)
+        elif datetime.fromtimestamp(path.stat().st_mtime) < started:
+            stale.append(name)
+        elif path.stat().st_size == 0:
+            empty.append(name)
+    return missing, stale, empty
+
+
 def write_blue_pixels_xlsx(output: Path) -> None:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
@@ -353,6 +384,76 @@ def coerce_cell(value: str) -> Any:
     return number
 
 
+def read_image_dimensions(path: Path) -> tuple[int, int]:
+    with path.open("rb") as f:
+        header = f.read(32)
+        if header.startswith(b"\x89PNG\r\n\x1a\n"):
+            return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+        if header[:2] == b"BM":
+            return int.from_bytes(header[18:22], "little", signed=True), abs(int.from_bytes(header[22:26], "little", signed=True))
+        if header[:2] in {b"II", b"MM"}:
+            endian = "little" if header[:2] == b"II" else "big"
+            f.seek(int.from_bytes(header[4:8], endian))
+            count = int.from_bytes(f.read(2), endian)
+            width = height = 0
+            for _ in range(count):
+                entry = f.read(12)
+                tag = int.from_bytes(entry[0:2], endian)
+                value = int.from_bytes(entry[8:12], endian)
+                if tag == 256:
+                    width = value
+                elif tag == 257:
+                    height = value
+            if width and height:
+                return width, height
+        if header[:2] == b"\xff\xd8":
+            f.seek(2)
+            while True:
+                marker = f.read(2)
+                while marker[:1] != b"\xff":
+                    marker = marker[1:] + f.read(1)
+                code = marker[1]
+                length = int.from_bytes(f.read(2), "big")
+                if 0xC0 <= code <= 0xC3 or 0xC5 <= code <= 0xC7 or 0xC9 <= code <= 0xCB or 0xCD <= code <= 0xCF:
+                    data = f.read(5)
+                    return int.from_bytes(data[3:5], "big"), int.from_bytes(data[1:3], "big")
+                f.seek(length - 2, 1)
+    raise ValueError(f"Unsupported image format for dimension validation: {path}")
+
+
+def validate_output_image_dimensions(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
+    if not bool_param(params.get("save_overlays", "true")):
+        return
+    expected = read_image_dimensions(original_image)
+    for name in [
+        f"cellmask_{image_stem}.tif",
+        f"blue_inside_cells_{image_stem}.tif",
+        f"vis_cellpixels_{image_stem}.png",
+        f"roi_overlay_{image_stem}.jpg",
+    ]:
+        actual = read_image_dimensions(output / name)
+        if actual != expected:
+            raise ValueError(f"{name} dimensions {actual} do not match original image dimensions {expected}")
+
+
+def validate_cell_feature_table(output: Path) -> None:
+    path = output / "cell_features.csv"
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            object_pixels = float(row.get("object_pixels") or 0)
+            blue_pixels = float(row.get("blue_pixels") or 0)
+            roi_area_pixels = float(row.get("roi_area_pixels") or 0)
+            fraction = float(row.get("blue_pixel_fraction") or 0)
+            percent = float(row.get("blue_pixel_percent") or 0)
+            if blue_pixels > object_pixels:
+                raise ValueError(f"blue_pixels exceeds object_pixels for object_id={row.get('object_id')}")
+            if object_pixels > roi_area_pixels:
+                raise ValueError(f"object_pixels exceeds roi_area_pixels for object_id={row.get('object_id')}")
+            expected_fraction = blue_pixels / object_pixels if object_pixels else 0
+            if abs(fraction - expected_fraction) > 1e-6 or abs(percent - 100 * expected_fraction) > 1e-3:
+                raise ValueError(f"blue fraction/percent mismatch for object_id={row.get('object_id')}")
+
+
 def copy_final_named_outputs(output: Path, image_stem: str) -> None:
     for source_name, target_template in FINAL_OUTPUT_MAP.items():
         source = output / source_name
@@ -360,9 +461,22 @@ def copy_final_named_outputs(output: Path, image_stem: str) -> None:
             shutil.copy2(source, output / target_template.format(image_stem=image_stem))
 
 
-def postprocess_outputs(output: Path, image_stem: str) -> None:
+def move_internal_outputs(output: Path) -> None:
+    internal = output / "_internal"
+    internal.mkdir(exist_ok=True)
+    internal_names = [name for name in ALWAYS_EXPECTED_OUTPUTS if name not in RUNNER_WRITTEN_OUTPUTS]
+    for name in set(internal_names + OVERLAY_EXPECTED_OUTPUTS + ["blue_table.xlsx", "fiji_stdout.txt", "fiji_stderr.txt", "runner_command.txt"]):
+        source = output / name
+        if source.exists():
+            shutil.move(str(source), str(internal / name))
+
+
+def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
+    validate_cell_feature_table(output)
     write_blue_pixels_xlsx(output)
     copy_final_named_outputs(output, image_stem)
+    validate_output_image_dimensions(output, image_stem, original_image, params)
+    move_internal_outputs(output)
     # final_frame_summary.csv is written by the macro; Python copies it to the final frame_features_<original_stem>.csv name.
 
 def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) -> None:
@@ -417,10 +531,10 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     missing, stale, empty = validate_expected_outputs(output, params, started)
     if returncode == 0 and not missing and not stale and not empty:
         try:
-            postprocess_outputs(output, image.stem)
+            postprocess_outputs(output, image.stem, image, params)
         except Exception as exc:
             postprocess_error = repr(exc)
-        missing, stale, empty = validate_expected_outputs(output, params, started, image.stem)
+        missing, stale, empty = validate_named_outputs(output, final_expected_outputs(params, image.stem), started)
 
     last_checkpoint = read_last_checkpoint(output)
     ok = returncode == 0 and not missing and not stale and not empty and not postprocess_error

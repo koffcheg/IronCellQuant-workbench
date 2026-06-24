@@ -155,6 +155,21 @@ if (fillHoles == 1) {
     checkpoint("after_fill_holes");
 }
 checkpoint("after_morphology_block");
+checkpoint("before_clear_border_metadata_artifacts");
+requireWindow(cellMaskTitle);
+setBackgroundColor(0,0,0);
+if (metadataBarHeight > 0) {
+    makeRectangle(0, maxOf(0, height - metadataBarHeight), width, minOf(metadataBarHeight, height));
+    run("Clear", "slice");
+}
+if (borderMarginPx > 0) {
+    makeRectangle(0, 0, width, minOf(borderMarginPx, height)); run("Clear", "slice");
+    makeRectangle(0, maxOf(0, height - borderMarginPx), width, minOf(borderMarginPx, height)); run("Clear", "slice");
+    makeRectangle(0, 0, minOf(borderMarginPx, width), height); run("Clear", "slice");
+    makeRectangle(maxOf(0, width - borderMarginPx), 0, minOf(borderMarginPx, width), height); run("Clear", "slice");
+}
+run("Select None");
+checkpoint("after_clear_border_metadata_artifacts");
 
 checkpoint("before_blue_mask_creation");
 selectWindow(blueTitle);
@@ -361,6 +376,7 @@ File.append(originalFileName + "," + groupName + ",all_cleaned_cell_material,fra
 if (saveOverlays == 1) {
     checkpoint("before_save_cellmask");
     requireWindow(cellMaskTitle);
+    run("Select None");
     run("Duplicate...", "title=CellMaterialMaskSave");
     requireWindow("CellMaterialMaskSave");
     saveAs("Tiff", outputDir + "/cellmask.tif");
@@ -370,6 +386,7 @@ if (saveOverlays == 1) {
 
     checkpoint("before_save_vis_cellpixels");
     requireWindow("Original_RGB");
+    run("Select None");
     run("Duplicate...", "title=VisCellPixels");
     requireWindow(cellMaskTitle);
     run("Create Selection");
@@ -388,6 +405,7 @@ if (saveOverlays == 1) {
 if (saveOverlays == 1) {
     checkpoint("before_save_blue_inside_cells");
     requireWindow("BlueInsideCells");
+    run("Select None");
     run("Duplicate...", "title=BlueInsideCellsSave");
     requireWindow("BlueInsideCellsSave");
     saveAs("Tiff", outputDir + "/blue_inside_cells.tif");
@@ -412,6 +430,7 @@ if (saveOverlays == 1) {
 
     checkpoint("before_save_roi_overlay");
     requireWindow("RoiOverlay");
+    run("Select None");
     saveAs("Jpeg", outputDir + "/roi_overlay.jpg");
     checkpoint("after_save_roi_overlay");
 }
@@ -482,7 +501,7 @@ function drawObjectOverlay(id, classification, area, accepted, fraction, bx, by)
     setLineWidth(contourWidth); setForegroundColor(rr,gg,bb); run("Draw", "slice");
     if (labelObjects == 1) {
         setFont("SansSerif", 18, "bold");
-        drawString("#" + id + " " + classification + " blue=" + d2s(100*fraction,2) + "%", bx, maxOf(20, by-6));
+        drawString("#" + id, bx, maxOf(20, by-6));
     }
     run("Select None");
 }
