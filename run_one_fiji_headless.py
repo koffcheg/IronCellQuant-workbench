@@ -45,6 +45,7 @@ DEBUG_OUTPUTS = [
     "debug_candidate_mask_cleaned.tif",
     "debug_weka_probability_map.tif",
     "debug_weka_class_map.tif",
+    "debug_weka_tile_mask_raw.tif",
     "weka_status.txt",
 ]
 
@@ -91,6 +92,8 @@ DEFAULT_PARAMS = {
     "min_stable_accepted_objects": "3",
     "max_stable_accepted_objects": "40",
     "min_stable_accepted_pixels": "500",
+    "weka_tile_size": "768",
+    "weka_tile_overlap": "64",
 }
 
 
@@ -641,7 +644,18 @@ def write_simple_png(path: Path, width: int, height: int, rgb: tuple[int, int, i
     path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
-def write_weka_missing_outputs(output: Path, image: Path, image_stem: str, weka_model: Path, params: dict[str, str]) -> None:
+def copy_hs_err_logs(output: Path) -> None:
+    internal = output / "_internal"
+    internal.mkdir(exist_ok=True)
+    roots = {Path.cwd(), output, output.parent}
+    for root in roots:
+        for log_path in root.glob("hs_err_pid*.log"):
+            target = internal / log_path.name
+            if log_path.resolve() != target.resolve():
+                shutil.copy2(log_path, target)
+
+
+def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_model: Path, params: dict[str, str], failure_status: str, detail: str) -> None:
     width, height = read_image_dimensions(image)
     write_simple_tiff(output / f"cellmask_{image_stem}.tif", width, height, 0)
     write_simple_tiff(output / f"blue_inside_cells_{image_stem}.tif", width, height, 0)
@@ -656,18 +670,20 @@ def write_weka_missing_outputs(output: Path, image: Path, image_stem: str, weka_
     shutil.copy2(output / "blue_table.xlsx", output / f"blue_table_{image_stem}.xlsx")
 
     summary_header = "image_name,image_width,image_height,accepted_object_count,accepted_object_pixels,accepted_blue_pixels,blue_pixel_percent_all_accepted,qc_status\n"
-    summary_row = f"{image.name},{width},{height},0,0,0,0,FAIL_WEKA_MODEL_MISSING\n"
+    summary_row = f"{image.name},{width},{height},0,0,0,0,{failure_status}\n"
     (output / "final_frame_summary.csv").write_text(summary_header + summary_row, encoding="utf-8-sig")
     shutil.copy2(output / "final_frame_summary.csv", output / f"frame_features_{image_stem}.csv")
     report = (
         "# IronCellQuant single-frame QC report\n\n"
-        "## Status\n\nFAIL_WEKA_MODEL_MISSING\n\n"
+        f"## Status\n\n{failure_status}\n\n"
         "## Weka model\n\n"
-        f"Expected Weka model path does not exist: {weka_model}\n\n"
+        f"Model path: {weka_model}\n\n"
+        f"{detail}\n\n"
         "No accepted biological ROI/cell-material regions were produced. Final placeholder outputs were written for QC review only.\n"
     )
     (output / "extended_qc_report.md").write_text(report, encoding="utf-8")
     move_internal_outputs(output)
+    copy_hs_err_logs(output)
 
 
 def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, params: dict[str, str], timeout_seconds: int, weka_model: Path | None = None) -> dict[str, str]:
@@ -676,13 +692,15 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     if weka_model is not None and not weka_model.exists():
         macro_arg, _ = build_macro_arg(fiji_input, image, output, project, {**params, "weka_model": str(weka_model)})
         write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, {**params, "weka_model": str(weka_model)})
-        write_weka_missing_outputs(output, image, image.stem, weka_model, params)
+        write_weka_failure_outputs(output, image, image.stem, weka_model, params, "FAIL_WEKA_MODEL_MISSING", f"Expected Weka model path does not exist: {weka_model}")
         finished = datetime.now()
         return {
             "project": str(project),
             "image": str(image),
             "fiji_input": str(fiji_input),
             "weka_model": str(weka_model),
+            "weka_tile_size": params.get("weka_tile_size", ""),
+            "weka_tile_overlap": params.get("weka_tile_overlap", ""),
             "output": str(output),
             "returncode": "0",
             "started": started.isoformat(timespec="seconds"),
@@ -722,9 +740,17 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     (output / "fiji_stdout.txt").write_text(stdout or "", encoding="utf-8", errors="replace")
     (output / "fiji_stderr.txt").write_text(stderr or "", encoding="utf-8", errors="replace")
     (output / "runner_command.txt").write_text(" ".join(cmd), encoding="utf-8", errors="replace")
-    append_runner_parameters_to_macro_log(output, params)
+    append_runner_parameters_to_macro_log(output, macro_params)
 
-    missing, stale, empty = validate_expected_outputs(output, params, started)
+    if weka_model is not None and returncode != 0:
+        status = "FAIL_WEKA_INFERENCE_MEMORY" if ("memory" in (stdout + stderr).lower() or "paging file" in (stdout + stderr).lower()) else "FAIL_WEKA_INFERENCE_CRASH"
+        detail = f"Weka inference failed before required outputs were complete. returncode={returncode}; last_checkpoint={read_last_checkpoint(output)}; tile_size={macro_params.get('weka_tile_size')}; tile_overlap={macro_params.get('weka_tile_overlap')}"
+        write_weka_failure_outputs(output, image, image.stem, weka_model, macro_params, status, detail)
+        postprocess_error = status
+        missing, stale, empty = validate_named_outputs(output, final_expected_outputs(params, image.stem), started)
+    else:
+        missing, stale, empty = validate_expected_outputs(output, params, started)
+
     if returncode == 0 and not missing and not stale and not empty:
         try:
             postprocess_outputs(output, image.stem, image, params)
@@ -739,6 +765,8 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
         "image": str(image),
         "fiji_input": str(fiji_input),
         "weka_model": "" if weka_model is None else str(weka_model),
+        "weka_tile_size": macro_params.get("weka_tile_size", ""),
+        "weka_tile_overlap": macro_params.get("weka_tile_overlap", ""),
         "output": str(output),
         "returncode": str(returncode),
         "started": started.isoformat(timespec="seconds"),
