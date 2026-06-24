@@ -758,6 +758,7 @@ function runWekaPrediction(modelPath) {
     script += "  var Duplicator = Packages.ij.plugin.Duplicator;\n";
     script += "  var ByteProcessor = Packages.ij.process.ByteProcessor;\n";
     script += "  var ImagePlus = Packages.ij.ImagePlus;\n";
+    script += "  var Integer = Packages.java.lang.Integer;\n";
     script += "  var imp = WM.getImage('Original_RGB');\n";
     script += "  var w = imp.getWidth(); var h = imp.getHeight();\n";
     script += "  var tileSize = " + d2s(wekaTileSize, 0) + "; var overlap = " + d2s(wekaTileOverlap, 0) + ";\n";
@@ -770,8 +771,12 @@ function runWekaPrediction(modelPath) {
     script += "  ck('before_first_weka_tile');\n";
     script += "  for (var y = 0; y < h; y += step) {\n";
     script += "    for (var x = 0; x < w; x += step) {\n";
-    script += "      var tw = Math.min(tileSize, w - x); var th = Math.min(tileSize, h - y);\n";
-    script += "      imp.setRoi(new Roi(x, y, tw, th));\n";
+    script += "      var tw = Math.floor(Math.min(tileSize, w - x)); var th = Math.floor(Math.min(tileSize, h - y));\n";
+    script += "      var xi = Integer.valueOf(String(Math.floor(x))); var yi = Integer.valueOf(String(Math.floor(y)));\n";
+    script += "      var twi = Integer.valueOf(String(tw)); var thi = Integer.valueOf(String(th));\n";
+    script += "      if (twi.intValue() <= 0 || thi.intValue() <= 0) continue;\n";
+    script += "      imp.setRoi(new Roi(xi, yi, twi, thi));\n";
+    script += "      if (tileCount == 0) ck('after_create_weka_tile_roi_1');\n";
     script += "      var tile = new Duplicator().run(imp);\n";
     script += "      var segmentator = new WekaSegmentation(tile);\n";
     script += "      segmentator.loadClassifier('" + jsPath(modelPath) + "');\n";
@@ -800,10 +805,11 @@ function runWekaPrediction(modelPath) {
     script += "  IJ.saveAs(mask, 'Tiff', '" + jsPath(tileMaskPath) + "');\n";
     script += "  IJ.saveAs(mask, 'Tiff', '" + jsPath(classMapPath) + "');\n";
     script += "  var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('OK'); fw.close();\n";
-    script += "} catch (e) { var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('FAIL_WEKA_PLUGIN_UNAVAILABLE\\n' + e); fw.close(); }\n";
+    script += "} catch (e) { var msg = String(e); var code = (msg.indexOf('ClassNotFound') >= 0 || msg.indexOf('NoClassDefFound') >= 0 || msg.indexOf('trainableSegmentation') >= 0) ? 'FAIL_WEKA_PLUGIN_UNAVAILABLE' : 'FAIL_WEKA_TILE_INFERENCE'; var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write(code + '\\n' + e); fw.close(); }\n";
     eval("script", script);
     status = File.openAsString(statusPath);
     if (startsWith(status, "OK")) return "";
+    if (startsWith(status, "FAIL_WEKA_TILE_INFERENCE")) return "FAIL_WEKA_TILE_INFERENCE";
     return "FAIL_WEKA_PLUGIN_UNAVAILABLE";
 }
 
