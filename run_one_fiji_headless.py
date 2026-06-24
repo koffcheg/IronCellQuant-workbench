@@ -4,6 +4,7 @@ import argparse
 import csv
 import os
 import shutil
+import importlib.util
 import subprocess
 from datetime import datetime
 from typing import Any
@@ -422,19 +423,104 @@ def read_image_dimensions(path: Path) -> tuple[int, int]:
     raise ValueError(f"Unsupported image format for dimension validation: {path}")
 
 
+def read_tiff_mask_stats(path: Path) -> dict[str, int]:
+    data = path.read_bytes()
+    if data[:2] not in {b"II", b"MM"}:
+        raise ValueError(f"Expected TIFF mask: {path}")
+    endian = "little" if data[:2] == b"II" else "big"
+    ifd = int.from_bytes(data[4:8], endian)
+    count = int.from_bytes(data[ifd:ifd + 2], endian)
+    tags: dict[int, tuple[int, int, int]] = {}
+    pos = ifd + 2
+    for _ in range(count):
+        entry = data[pos:pos + 12]
+        tag = int.from_bytes(entry[0:2], endian)
+        typ = int.from_bytes(entry[2:4], endian)
+        num = int.from_bytes(entry[4:8], endian)
+        val = int.from_bytes(entry[8:12], endian)
+        tags[tag] = (typ, num, val)
+        pos += 12
+
+    width = tags.get(256, (0, 0, 0))[2]
+    height = tags.get(257, (0, 0, 0))[2]
+    bits = tags.get(258, (0, 0, 8))[2]
+    compression = tags.get(259, (0, 0, 1))[2]
+    samples = tags.get(277, (0, 0, 1))[2]
+    if compression != 1:
+        raise ValueError(f"Compressed TIFF mask is not supported for QC validation: {path}")
+    if samples != 1:
+        raise ValueError(f"Mask appears to have {samples} samples per pixel, expected one channel: {path}")
+    strip_offset = tags.get(273, (0, 0, 0))[2]
+    strip_count = tags.get(279, (0, 0, 0))[2]
+    if not strip_offset or not strip_count:
+        raise ValueError(f"TIFF mask is missing strip offsets/counts: {path}")
+    pixels = data[strip_offset:strip_offset + strip_count]
+    if bits == 8:
+        nonzero = sum(1 for value in pixels if value != 0)
+    elif bits == 16:
+        nonzero = 0
+        for i in range(0, len(pixels), 2):
+            if int.from_bytes(pixels[i:i+2], endian) != 0:
+                nonzero += 1
+    else:
+        raise ValueError(f"Unsupported TIFF mask bit depth {bits}: {path}")
+    return {"width": width, "height": height, "nonzero": nonzero, "samples": samples, "bits": bits}
+
+
+def images_effectively_same(path_a: Path, path_b: Path) -> bool:
+    if importlib.util.find_spec("PIL") is None:
+        return False
+    from PIL import Image, ImageChops, ImageStat
+    with Image.open(path_a) as image_a, Image.open(path_b) as image_b:
+        image_a = image_a.convert("RGB")
+        image_b = image_b.convert("RGB")
+        if image_a.size != image_b.size:
+            return False
+        diff = ImageChops.difference(image_a, image_b)
+        stat = ImageStat.Stat(diff)
+        return max(stat.mean) < 0.5
+
+
+def validate_frame_summary(output: Path) -> dict[str, float]:
+    summary = read_single_csv_row(output / "final_frame_summary.csv")
+    accepted_objects = float(summary.get("accepted_object_count") or 0)
+    accepted_pixels = float(summary.get("accepted_object_pixels") or 0)
+    accepted_blue = float(summary.get("accepted_blue_pixels") or 0)
+    if accepted_blue > accepted_pixels:
+        raise ValueError("accepted_blue_pixels exceeds accepted_object_pixels")
+    if accepted_objects == 0:
+        raise ValueError("accepted_object_count is zero for this expected-positive single-frame run")
+    return {
+        "accepted_object_count": accepted_objects,
+        "accepted_object_pixels": accepted_pixels,
+        "accepted_blue_pixels": accepted_blue,
+    }
+
+
 def validate_output_image_dimensions(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
     if not bool_param(params.get("save_overlays", "true")):
         return
     expected = read_image_dimensions(original_image)
-    for name in [
+    final_names = [
         f"cellmask_{image_stem}.tif",
         f"blue_inside_cells_{image_stem}.tif",
         f"vis_cellpixels_{image_stem}.png",
         f"roi_overlay_{image_stem}.jpg",
-    ]:
+    ]
+    for name in final_names:
         actual = read_image_dimensions(output / name)
         if actual != expected:
             raise ValueError(f"{name} dimensions {actual} do not match original image dimensions {expected}")
+    cellmask_stats = read_tiff_mask_stats(output / f"cellmask_{image_stem}.tif")
+    blue_stats = read_tiff_mask_stats(output / f"blue_inside_cells_{image_stem}.tif")
+    if cellmask_stats["nonzero"] == 0:
+        raise ValueError("accepted cellmask is empty")
+    if blue_stats["nonzero"] > cellmask_stats["nonzero"]:
+        raise ValueError("blue_inside_cells has more nonzero pixels than cellmask")
+    if images_effectively_same(original_image, output / f"vis_cellpixels_{image_stem}.png"):
+        raise ValueError("vis_cellpixels appears unchanged from the original input")
+    if images_effectively_same(original_image, output / f"roi_overlay_{image_stem}.jpg"):
+        raise ValueError("roi_overlay appears unchanged from the original input")
 
 
 def validate_cell_feature_table(output: Path) -> None:
@@ -478,6 +564,7 @@ def move_internal_outputs(output: Path) -> None:
 
 
 def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
+    validate_frame_summary(output)
     validate_cell_feature_table(output)
     write_blue_pixels_xlsx(output)
     copy_final_named_outputs(output, image_stem)
