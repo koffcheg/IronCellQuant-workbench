@@ -175,3 +175,59 @@ Immediate next debugging target:
 - keep output minimal until the segmentation profile is stable.
 
 Do not run full-directory batch processing until the single-image pipeline produces a visually acceptable `final_analysis_overlay.tif`.
+
+## PCA Analysis
+
+The PCA module is independent from Fiji/ImageJ and from the current image-processing macro. It consumes an already prepared FeatureMatrix CSV and writes PCA tables, plots, reports, metadata, and a serialized model.
+
+Input format:
+
+- one row per analysed object (`object x features`);
+- service columns are required: `image_name`, `object_type`, `object_id`;
+- all non-service numeric columns are treated as candidate features unless excluded by config;
+- the module does not estimate or report actual iron concentration.
+
+Run with defaults:
+
+```powershell
+python .\run_pca.py --input .\output\frame_features_for_pca.csv --output .\output\pca_run
+```
+
+Run with a JSON config:
+
+```powershell
+python .\run_pca.py --input .\output\frame_features_for_pca.csv --output .\output\pca_run --config .\pca_config.json
+```
+
+Common config fields include:
+
+```json
+{
+  "target_feature": "blue_pixel_percent",
+  "color_feature": "blue_pixel_percent",
+  "scatter_component_x": "PC1",
+  "scatter_component_y": "PC2",
+  "top_feature_count": 10,
+  "biplot_top_feature_count": 15,
+  "pca_component_count": 0
+}
+```
+
+Primary output files:
+
+- `Data_Check_Report.txt`
+- `Standardized_Features.csv`
+- `Feature_Preprocessing_Report.txt`
+- `PCA_Summary.csv`
+- `PCA_Loadings.csv`
+- `PCA_Scores.csv`
+- `PCA_TopFeatures.csv`
+- `PCA_Correlation_With_BluePixel.csv`
+- `PCA_Scatter_PC1_PC2.png`
+- `PCA_Biplot_PC1_PC2.png`
+- `PCA_ExplainedVariance.png`
+- `PCA_Report.txt`
+- `PCA_Run_Metadata.json`
+- `PCA_Model.joblib`
+
+`PCA_Scores.csv` stores object coordinates in principal-component space. `PCA_Loadings.csv` stores feature loadings used to interpret components. `PCA_TopFeatures.csv` ranks the strongest contributors per component. `PCA_Correlation_With_BluePixel.csv` summarizes statistical association with `blue_pixel_percent`; it is not a calibrated measurement of iron concentration.

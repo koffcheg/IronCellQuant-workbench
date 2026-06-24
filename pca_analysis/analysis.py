@@ -18,6 +18,7 @@ from .config import PCAConfig
 from .data_io import write_text_report
 from .preprocessing import PreprocessingResult
 from .validation import ValidationResult
+from .visualization import write_pca_visualizations
 
 
 @dataclass
@@ -155,6 +156,18 @@ def run_pca_analysis(
     _write_csv(output_path, "PCA_Loadings.csv", loadings, result)
     _write_csv(output_path, "PCA_TopFeatures.csv", top_features, result)
     _write_csv(output_path, "PCA_Correlation_With_BluePixel.csv", correlations, result)
+    result.generated_files.extend(
+        write_pca_visualizations(
+            output_path,
+            config,
+            summary,
+            scores,
+            loadings,
+            preprocessed,
+            component_names,
+            result.warnings,
+        )
+    )
     _write_report(input_path, output_path, config, validation_result, preprocessing_result, result)
     _write_metadata(input_path, output_path, config, validation_result, preprocessing_result, result)
     _write_model(output_path, config, preprocessing_result, result)
