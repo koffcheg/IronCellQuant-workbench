@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 import json
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,24 @@ class PCAConfig:
     color_feature: str = "blue_pixel_percent"
     scatter_component_x: str = "PC1"
     scatter_component_y: str = "PC2"
+    explained_variance_plot_max_components: int = 15
+    biplot_label_mode: str = "numbered_legend"
     biplot_top_feature_count: int = 15
+    biplot_legend_include_loadings: bool = True
+    biplot_save_direct_label_debug_plot: bool = False
+    allowed_object_types: list[str] | None = field(
+        default_factory=lambda: [
+            "single_cell",
+            "aggregate",
+            "all_cell_material",
+            "all_cells",
+            "frame",
+            "frame_level",
+        ]
+    )
+    delivery_export_enabled: bool = False
+    delivery_export_dir: str | None = None
+    delivery_filename_mode: str = "prefix_input_name"
     service_columns: list[str] | None = None
     exclude_columns: list[str] | None = None
     include_columns: list[str] | None = None
@@ -76,6 +93,25 @@ def validate_config(config: PCAConfig) -> list[str]:
     _validate_non_negative_int("pca_component_count", config.pca_component_count, errors)
     _validate_non_negative_int("top_feature_count", config.top_feature_count, errors)
     _validate_non_negative_int("biplot_top_feature_count", config.biplot_top_feature_count, errors)
+    _validate_positive_int(
+        "explained_variance_plot_max_components",
+        config.explained_variance_plot_max_components,
+        errors,
+    )
+
+    allowed_biplot_modes = {"numbered_legend", "direct_labels", "none"}
+    if config.biplot_label_mode not in allowed_biplot_modes:
+        errors.append(
+            "biplot_label_mode must be one of: "
+            f"{', '.join(sorted(allowed_biplot_modes))}."
+        )
+
+    allowed_delivery_modes = {"prefix_input_name", "standard"}
+    if config.delivery_filename_mode not in allowed_delivery_modes:
+        errors.append(
+            "delivery_filename_mode must be one of: "
+            f"{', '.join(sorted(allowed_delivery_modes))}."
+        )
 
     if not isinstance(config.min_explained_variance, (int, float)) or isinstance(config.min_explained_variance, bool):
         errors.append("min_explained_variance must be numeric and > 0.")
@@ -88,10 +124,17 @@ def validate_config(config: PCAConfig) -> list[str]:
     _validate_string_list("exclude_columns", config.exclude_columns, errors, non_empty=False)
     if config.include_columns is not None:
         _validate_string_list("include_columns", config.include_columns, errors, non_empty=False)
+    if config.allowed_object_types is not None:
+        _validate_string_list("allowed_object_types", config.allowed_object_types, errors, non_empty=False)
+    if config.delivery_export_dir is not None and not isinstance(config.delivery_export_dir, str):
+        errors.append("delivery_export_dir must be a string or null.")
 
     _validate_bool("exclude_target_from_pca", config.exclude_target_from_pca, errors)
     _validate_bool("standardization_enabled", config.standardization_enabled, errors)
     _validate_bool("remove_zero_variance_features", config.remove_zero_variance_features, errors)
+    _validate_bool("biplot_legend_include_loadings", config.biplot_legend_include_loadings, errors)
+    _validate_bool("biplot_save_direct_label_debug_plot", config.biplot_save_direct_label_debug_plot, errors)
+    _validate_bool("delivery_export_enabled", config.delivery_export_enabled, errors)
 
     for name in ["target_feature", "color_feature", "scatter_component_x", "scatter_component_y"]:
         value = getattr(config, name)
@@ -104,6 +147,11 @@ def validate_config(config: PCAConfig) -> list[str]:
 def _validate_non_negative_int(name: str, value: Any, errors: list[str]) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         errors.append(f"{name} must be an integer >= 0.")
+
+
+def _validate_positive_int(name: str, value: Any, errors: list[str]) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        errors.append(f"{name} must be an integer >= 1.")
 
 
 def _validate_bool(name: str, value: Any, errors: list[str]) -> None:

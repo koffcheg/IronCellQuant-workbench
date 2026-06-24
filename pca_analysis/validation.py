@@ -90,6 +90,7 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
     missing_service_columns = [column for column in config.service_columns or [] if column not in dataframe.columns]
     if missing_service_columns:
         result.errors.append(f"Missing required service column(s): {', '.join(missing_service_columns)}")
+    _check_object_type_compatibility(dataframe, config, result)
 
     result.missing_value_count = int(dataframe.isna().sum().sum())
     result.empty_columns = [column for column in dataframe.columns if dataframe[column].isna().all()]
@@ -181,6 +182,30 @@ def _candidate_columns(
                 candidate_columns.append(extra_column)
 
     return candidate_columns, pca_candidate_columns
+
+
+def _check_object_type_compatibility(
+    dataframe: pd.DataFrame,
+    config: PCAConfig,
+    result: ValidationResult,
+) -> None:
+    if config.allowed_object_types is None or "object_type" not in dataframe.columns:
+        return
+
+    allowed = set(config.allowed_object_types)
+    values = sorted(
+        {
+            str(value).strip()
+            for value in dataframe["object_type"].dropna().unique().tolist()
+            if str(value).strip()
+        }
+    )
+    unexpected = [value for value in values if value not in allowed]
+    if unexpected:
+        result.warnings.append(
+            "Object type value(s) not listed in PCA specification/config: "
+            f"{', '.join(unexpected)}"
+        )
 
 
 def _profile_candidate_columns(

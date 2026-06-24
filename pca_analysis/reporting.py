@@ -94,8 +94,15 @@ def write_pca_report(
             )
 
     lines.append("")
+    delivery = result.delivery_export
+    lines.append(f"Delivery named copies: {'enabled' if delivery.get('enabled') else 'disabled'}")
+    if delivery.get("enabled"):
+        lines.append(f"Delivery export path: {delivery.get('directory')}")
+        lines.append(f"Delivery filename mode: {delivery.get('filename_mode')}")
+    lines.append("")
     lines.append("Generated files:")
-    lines.extend([f"- {filename}" for filename in result.generated_files] or ["- none"])
+    generated_files = _unique_filenames(result.generated_files + ["PCA_Report.txt", "PCA_Run_Metadata.json"])
+    lines.extend([f"- {filename}" for filename in generated_files] or ["- none"])
     lines.append("")
     lines.append("Warnings:")
     all_warnings = validation_result.warnings + preprocessing_result.warnings + result.warnings
@@ -107,4 +114,16 @@ def write_pca_report(
     )
 
     write_text_report(output_dir / "PCA_Report.txt", "\n".join(lines) + "\n")
-    result.generated_files.append("PCA_Report.txt")
+    if "PCA_Report.txt" not in result.generated_files:
+        result.generated_files.append("PCA_Report.txt")
+
+
+def _unique_filenames(filenames: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for filename in filenames:
+        if filename in seen:
+            continue
+        seen.add(filename)
+        unique.append(filename)
+    return unique

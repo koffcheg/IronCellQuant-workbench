@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import shutil
 from typing import Any
 
 import numpy as np
@@ -30,6 +31,7 @@ class PCAAnalysisResult:
     component_names: list[str] = field(default_factory=list)
     recommended_component_count: int | None = None
     generated_files: list[str] = field(default_factory=list)
+    delivery_export: dict[str, Any] = field(default_factory=lambda: {"enabled": False})
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -166,9 +168,11 @@ def run_pca_analysis(
             result.warnings,
         )
     )
-    write_pca_report(input_path, output_path, config, validation_result, preprocessing_result, result)
-    write_run_metadata(input_path, output_path, config, validation_result, preprocessing_result, result)
     write_pca_model(output_path, config, preprocessing_result, result)
+    _plan_delivery_export(input_path, output_path, config, result)
+    write_pca_report(input_path, output_path, config, validation_result, preprocessing_result, result)
+    _write_delivery_export(output_path, result)
+    write_run_metadata(input_path, output_path, config, validation_result, preprocessing_result, result)
 
     return result
 
@@ -276,3 +280,88 @@ def _write_csv(output_dir: Path, filename: str, dataframe: pd.DataFrame, result:
     path = output_dir / filename
     dataframe.to_csv(path, index=False)
     result.generated_files.append(filename)
+
+
+def _plan_delivery_export(
+    input_path: str | Path,
+    output_dir: Path,
+    config: PCAConfig,
+    result: PCAAnalysisResult,
+) -> None:
+    if not config.delivery_export_enabled:
+        result.delivery_export = {"enabled": False}
+        return
+
+    delivery_dir = Path(config.delivery_export_dir) if config.delivery_export_dir else output_dir / "delivery_named_outputs"
+    input_stem = Path(input_path).stem
+    source_names = [
+        "PCA_Summary.csv",
+        "PCA_Loadings.csv",
+        "PCA_Scores.csv",
+        "PCA_TopFeatures.csv",
+        "PCA_Correlation_With_BluePixel.csv",
+        "PCA_Report.txt",
+        "PCA_Scatter_PC1_PC2.png",
+        "PCA_Biplot_PC1_PC2.png",
+        "PCA_ExplainedVariance.png",
+        "PCA_Loadings_PC1.png",
+        "PCA_Loadings_PC2.png",
+        "PCA_Loadings_PC3.png",
+    ]
+
+    planned_files: list[dict[str, str]] = []
+    for source_name in source_names:
+        if source_name != "PCA_Report.txt" and source_name not in result.generated_files:
+            continue
+        destination_name = _delivery_filename(source_name, input_stem, config.delivery_filename_mode)
+        planned_files.append(
+            {
+                "source": source_name,
+                "destination": str(delivery_dir / destination_name),
+                "generated_file": _generated_delivery_path(output_dir, delivery_dir, destination_name),
+            }
+        )
+
+    result.delivery_export = {
+        "enabled": True,
+        "directory": str(delivery_dir),
+        "filename_mode": config.delivery_filename_mode,
+        "files": planned_files,
+    }
+    for item in planned_files:
+        if item["generated_file"] not in result.generated_files:
+            result.generated_files.append(item["generated_file"])
+
+
+def _write_delivery_export(output_dir: Path, result: PCAAnalysisResult) -> None:
+    delivery = result.delivery_export
+    if not delivery.get("enabled"):
+        return
+
+    delivery_dir = Path(str(delivery["directory"]))
+    delivery_dir.mkdir(parents=True, exist_ok=True)
+    copied_files: list[str] = []
+    for item in delivery.get("files", []):
+        source = output_dir / item["source"]
+        destination = Path(item["destination"])
+        if not source.exists():
+            result.warnings.append(f"Delivery export skipped missing source file: {item['source']}")
+            continue
+        shutil.copy2(source, destination)
+        copied_files.append(str(destination))
+    delivery["copied_files"] = copied_files
+
+
+def _delivery_filename(source_name: str, input_stem: str, filename_mode: str) -> str:
+    if filename_mode == "standard":
+        return source_name
+    path = Path(source_name)
+    return f"{path.stem}_{input_stem}{path.suffix}"
+
+
+def _generated_delivery_path(output_dir: Path, delivery_dir: Path, destination_name: str) -> str:
+    destination = delivery_dir / destination_name
+    try:
+        return str(destination.relative_to(output_dir))
+    except ValueError:
+        return str(destination)

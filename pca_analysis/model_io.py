@@ -66,8 +66,9 @@ def write_run_metadata(
         "missing_numeric_counts": preprocessing_result.missing_numeric_counts,
         "removed_features_and_reasons": preprocessing_result.removed_features_reasons,
         "actual_scatter_filenames": scatter_files,
+        "delivery_export": result.delivery_export,
         "warnings": validation_result.warnings + preprocessing_result.warnings + result.warnings,
-        "generated_files": result.generated_files + ["PCA_Run_Metadata.json", "PCA_Model.joblib"],
+        "generated_files": _unique_filenames(result.generated_files + ["PCA_Run_Metadata.json", "PCA_Model.joblib"]),
         "library_versions": {
             "joblib": joblib.__version__,
             "matplotlib": matplotlib.__version__,
@@ -79,7 +80,8 @@ def write_run_metadata(
     }
     path = output_dir / "PCA_Run_Metadata.json"
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    result.generated_files.append("PCA_Run_Metadata.json")
+    if "PCA_Run_Metadata.json" not in result.generated_files:
+        result.generated_files.append("PCA_Run_Metadata.json")
 
 
 def write_pca_model(
@@ -97,10 +99,22 @@ def write_pca_model(
         "config": asdict(config),
     }
     joblib.dump(model_payload, output_dir / "PCA_Model.joblib")
-    result.generated_files.append("PCA_Model.joblib")
+    if "PCA_Model.joblib" not in result.generated_files:
+        result.generated_files.append("PCA_Model.joblib")
 
 
 def _python_version() -> str:
     import sys
 
     return sys.version
+
+
+def _unique_filenames(filenames: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for filename in filenames:
+        if filename in seen:
+            continue
+        seen.add(filename)
+        unique.append(filename)
+    return unique

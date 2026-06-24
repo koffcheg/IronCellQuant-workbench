@@ -224,7 +224,12 @@ Common config fields include:
   "scatter_component_x": "PC1",
   "scatter_component_y": "PC2",
   "top_feature_count": 10,
+  "explained_variance_plot_max_components": 15,
+  "biplot_label_mode": "numbered_legend",
   "biplot_top_feature_count": 15,
+  "biplot_legend_include_loadings": true,
+  "biplot_save_direct_label_debug_plot": false,
+  "delivery_export_enabled": false,
   "pca_component_count": 0
 }
 ```
@@ -242,6 +247,9 @@ Primary output files:
 - `PCA_Scatter_PC1_PC2.png` by default, or `PCA_Scatter_<PCX>_<PCY>.png` for a configured component pair such as `PCA_Scatter_PC1_PC3.png`
 - `PCA_Biplot_PC1_PC2.png`
 - `PCA_ExplainedVariance.png`
+- `PCA_Loadings_PC1.png`
+- `PCA_Loadings_PC2.png`
+- `PCA_Loadings_PC3.png` when PC3 exists
 - `PCA_Report.txt`
 - `PCA_Run_Metadata.json`
 - `PCA_Model.joblib`
@@ -249,3 +257,9 @@ Primary output files:
 `PCA_Scores.csv` stores object coordinates in principal-component space. `PCA_Loadings.csv` stores feature loadings used to interpret components. `PCA_TopFeatures.csv` ranks the strongest contributors per component. `PCA_Correlation_With_BluePixel.csv` summarizes statistical association with `blue_pixel_percent`; it is not a calibrated measurement of iron concentration.
 
 When `exclude_target_from_pca=true`, `target_feature` is excluded only from the PCA feature matrix and loadings. The raw target remains available for correlation analysis, scatter coloring, reports, and metadata when it exists and can be converted to numeric. Scatter color values for `blue_pixel_percent` use raw/original numeric values, not standardized z-scores.
+
+`PCA_Biplot_PC1_PC2.png` uses `biplot_label_mode="numbered_legend"` by default. In that mode, arrows stay on the biplot, arrow ends show compact numbers, and the full feature names are listed in a right-side legend/table to avoid overlapping text. `biplot_label_mode="direct_labels"` writes feature names directly beside the arrows, and `biplot_label_mode="none"` writes arrows without labels. Set `biplot_save_direct_label_debug_plot=true` to also write `PCA_Biplot_PC1_PC2_labeled.png` as a direct-label debug artifact.
+
+`PCA_ExplainedVariance.png` is optimized for readability and may show only the first `explained_variance_plot_max_components` components. The full component table always remains in `PCA_Summary.csv`.
+
+Optional delivery copies can be enabled with `delivery_export_enabled=true`. This creates input-name-based human-readable copies in `delivery_named_outputs` by default, or in `delivery_export_dir` when provided. These copies do not replace the standard PCA filenames above; the standard names remain the primary output contract.
