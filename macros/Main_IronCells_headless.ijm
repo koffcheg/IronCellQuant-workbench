@@ -131,8 +131,8 @@ checkpoint("after_split_rgb_channels");
 checkpoint("before_prepare_segmentation_gray");
 if (wekaModelPath != "") {
     checkpoint("before_weka_prediction");
-    runWekaPrediction(wekaModelPath);
-    if (wekaFailureStatus == "") ensureWekaCellMaskWindow();
+    wekaFailureStatus = runWekaPrediction(wekaModelPath);
+    if (wekaFailureStatus == "") wekaFailureStatus = ensureWekaCellMaskWindow();
     if (wekaFailureStatus != "") {
         logLine(wekaFailureStatus + ": Weka tile inference did not produce a usable stitched cell-material mask.");
         newImage("CellMaterialMask", "8-bit black", width, height, 1);
@@ -803,28 +803,34 @@ function runWekaPrediction(modelPath) {
     script += "} catch (e) { var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('FAIL_WEKA_PLUGIN_UNAVAILABLE\\n' + e); fw.close(); }\n";
     eval("script", script);
     status = File.openAsString(statusPath);
-    if (startsWith(status, "OK")) {
-        wekaFailureStatus = "";
-    } else {
-        wekaFailureStatus = "FAIL_WEKA_PLUGIN_UNAVAILABLE";
-    }
+    if (startsWith(status, "OK")) return "";
+    return "FAIL_WEKA_PLUGIN_UNAVAILABLE";
 }
 
 function ensureWekaCellMaskWindow() {
     if (windowExists("WekaCellMaskRaw")) {
+        selectWindow("WekaCellMaskRaw");
+        if (getWidth() != width || getHeight() != height) {
+            logLine("FAIL_WEKA_MASK_MISSING: WekaCellMaskRaw dimensions do not match the original image.");
+            return "FAIL_WEKA_MASK_MISSING";
+        }
         checkpoint("after_create_WekaCellMaskRaw");
-        return;
+        return "";
     }
     tileMaskPath = outputDir + "/debug_weka_tile_mask_raw.tif";
     if (File.exists(tileMaskPath)) {
         checkpoint("before_open_stitched_weka_mask");
         open(tileMaskPath);
         rename("WekaCellMaskRaw");
+        if (getWidth() != width || getHeight() != height) {
+            logLine("FAIL_WEKA_MASK_MISSING: restored stitched Weka mask dimensions do not match the original image.");
+            return "FAIL_WEKA_MASK_MISSING";
+        }
         checkpoint("after_create_WekaCellMaskRaw");
-        return;
+        return "";
     }
-    wekaFailureStatus = "FAIL_WEKA_MASK_MISSING";
     logLine("FAIL_WEKA_MASK_MISSING: Weka status was OK, but no WekaCellMaskRaw window or stitched mask file was found.");
+    return "FAIL_WEKA_MASK_MISSING";
 }
 
 function jsPath(pathValue) {
