@@ -180,13 +180,19 @@ Do not run full-directory batch processing until the single-image pipeline produ
 
 The PCA module is independent from Fiji/ImageJ and from the current image-processing macro. It consumes an already prepared universal FeatureMatrix CSV and writes PCA tables, plots, reports, metadata, and a serialized model. The current Fiji macro is not a required data source for PCA.
 
+Install Python dependencies before running PCA:
+
+```powershell
+pip install -r requirements.txt
+```
+
 Input format:
 
 - one row per analysed object (`object x features`);
 - service columns are required: `image_name`, `object_type`, `object_id`;
 - all non-service numeric columns are treated as candidate features unless excluded by config;
 - at least 2 objects/rows and at least 2 numeric PCA features are required;
-- CSV rows must have the same number of fields as the header;
+- empty/blank CSV lines are ignored during validation, but non-empty rows must have the same number of fields as the header;
 - the module does not estimate or report actual iron concentration.
 
 Run with defaults:

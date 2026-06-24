@@ -25,6 +25,7 @@ class ValidationResult:
     empty_columns: list[str] = field(default_factory=list)
     zero_variance_numeric_columns: list[str] = field(default_factory=list)
     field_count_errors: list[str] = field(default_factory=list)
+    blank_line_count: int = 0
     numeric_candidate_columns: list[str] = field(default_factory=list)
     non_numeric_excluded_columns: list[str] = field(default_factory=list)
     invalid_numeric_counts: dict[str, int] = field(default_factory=dict)
@@ -60,7 +61,9 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
         write_data_check_report(output_dir, result)
         return result
 
-    result.field_count_errors = _check_csv_field_counts(path, config.delimiter, len(header))
+    result.field_count_errors, result.blank_line_count = _check_csv_field_counts(path, config.delimiter, len(header))
+    if result.blank_line_count:
+        result.warnings.append(f"Blank CSV lines skipped: {result.blank_line_count}")
     if result.field_count_errors:
         result.errors.extend(result.field_count_errors)
         write_data_check_report(output_dir, result)
@@ -130,19 +133,23 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
     return result
 
 
-def _check_csv_field_counts(path: Path, delimiter: str, expected_count: int) -> list[str]:
+def _check_csv_field_counts(path: Path, delimiter: str, expected_count: int) -> tuple[list[str], int]:
     errors: list[str] = []
+    blank_line_count = 0
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.reader(handle, delimiter=delimiter)
         next(reader, None)
         for line_number, row in enumerate(reader, start=2):
+            if row == [] or all(field.strip() == "" for field in row):
+                blank_line_count += 1
+                continue
             actual_count = len(row)
             if actual_count != expected_count:
                 errors.append(
                     "CSV row has inconsistent field count: "
                     f"line {line_number}, expected {expected_count}, actual {actual_count}."
                 )
-    return errors
+    return errors, blank_line_count
 
 
 def _candidate_columns(
@@ -246,6 +253,7 @@ def write_data_check_report(output_dir: str | Path, result: ValidationResult) ->
             f"Zero-variance numeric columns ({len(result.zero_variance_numeric_columns)}): "
             f"{', '.join(result.zero_variance_numeric_columns) or 'none'}"
         ),
+        f"Blank CSV lines skipped: {result.blank_line_count}",
         "",
         "Errors:",
     ]
