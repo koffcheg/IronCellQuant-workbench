@@ -14,6 +14,8 @@ originalLongPath = getArgString(arg, "original_long_path", inputPath);
 originalFileName = getArgString(arg, "original_file_name", "");
 groupName = getArgString(arg, "group_name", "unknown");
 shortPathUsed = getArgString(arg, "short_path_used", "");
+wekaModelPath = getArgString(arg, "weka_model", "");
+wekaFailureStatus = "";
 
 thresholdMethod = getArgString(arg, "threshold_method", "Li");
 thresholdMode = getArgString(arg, "threshold_mode", "bright");
@@ -59,6 +61,7 @@ logLine("Input(short/Fiji): " + inputPath);
 logLine("Input(original): " + originalLongPath);
 logLine("Output: " + outputDir);
 logLine("Group: " + groupName);
+if (wekaModelPath != "") logLine("Weka model: " + wekaModelPath);
 logLine("Feature definition: blue_pixel_fraction = blue_pixels / object_pixels. This is a preliminary blue-pixel optical feature, not a calibrated concentration measurement.");
 
 setBatchMode(true);
@@ -121,6 +124,26 @@ selectWindow(blueTitle); rename("Blue_Channel"); blueTitle = "Blue_Channel";
 checkpoint("after_split_rgb_channels");
 
 checkpoint("before_prepare_segmentation_gray");
+if (wekaModelPath != "") {
+    checkpoint("before_weka_prediction");
+    runWekaPrediction(wekaModelPath);
+    if (wekaFailureStatus != "") {
+        logLine(wekaFailureStatus + ": Fiji Trainable Weka Segmentation is required for --weka-model runs.");
+        newImage("CellMaterialMask", "8-bit black", width, height, 1);
+        cellMaskTitle = "CellMaterialMask";
+    } else {
+        requireWindow("WekaCellProbability");
+        if (bitDepth() == 32) setThreshold(0.5, 1.0);
+        else setThreshold(128, 255);
+        run("Convert to Mask");
+        rename("CellMaterialMask");
+        cellMaskTitle = "CellMaterialMask";
+    }
+    requireWindow(cellMaskTitle);
+    if (saveOverlays == 1) saveDebugImage(cellMaskTitle, "debug_candidate_mask_raw.tif");
+    checkpoint("after_weka_prediction");
+} else {
+checkpoint("before_prepare_segmentation_gray");
 selectWindow("Original_RGB");
 run("Duplicate...", "title=SegmentationBase");
 run("8-bit");
@@ -155,6 +178,8 @@ if (saveOverlays == 1) {
     saveDebugImage(cellMaskTitle, "debug_candidate_mask_raw.tif");
 }
 checkpoint("after_prepare_stage1a_texture_contrast_candidate_mask");
+
+}
 
 selectWindow(cellMaskTitle);
 if (morphOpenIterations > 0) {
@@ -461,6 +486,7 @@ if (acceptedCount < minStableAcceptedObjects) lowAcceptedAreaWarning = 1;
 if (totalAcceptedObjectPixels < minStableAcceptedPixels) lowAcceptedAreaWarning = 1;
 
 qcStatus = "PASS";
+if (wekaFailureStatus != "") qcStatus = appendQcStatus(qcStatus, wekaFailureStatus);
 if (acceptedCount == 0) qcStatus = appendQcStatus(qcStatus, "FAIL_NO_ACCEPTED_OBJECTS");
 if (acceptedCount < minExpectedAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_OBJECT_COUNT");
 if (roiWarningCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_ROI_RECONSTRUCTION");
@@ -694,6 +720,7 @@ function writeQcReport(qcStatus) {
     report += "- min_stable_accepted_pixels: " + minStableAcceptedPixels + "\n\n";
     if (qcStatus != "PASS") {
         report += "## Warnings\n\n";
+        if (wekaFailureStatus != "") report += "- " + wekaFailureStatus + ": Fiji Trainable Weka Segmentation is required for --weka-model runs.\n";
         if (acceptedCount == 0) {
             report += "- FAIL_NO_ACCEPTED_OBJECTS: Stage 1A detector found no accepted biological ROI/cell-material regions.\n";
             if (borderCount > 0) report += "- Only rejected border/annotation artifact candidates were detected in this run; they are not reported as biological ROIs.\n";
@@ -711,6 +738,44 @@ function writeQcReport(qcStatus) {
     File.saveString(report, outputDir + "/extended_qc_report.md");
 }
 
+
+function runWekaPrediction(modelPath) {
+    statusPath = outputDir + "/weka_status.txt";
+    classMapPath = outputDir + "/debug_weka_class_map.tif";
+    probabilityPath = outputDir + "/debug_weka_probability_map.tif";
+    script = "";
+    script += "var IJ = Packages.ij.IJ;\n";
+    script += "var WM = Packages.ij.WindowManager;\n";
+    script += "var FileWriter = Packages.java.io.FileWriter;\n";
+    script += "try {\n";
+    script += "  var WekaSegmentation = Packages.trainableSegmentation.WekaSegmentation;\n";
+    script += "  var imp = WM.getImage('Original_RGB');\n";
+    script += "  var segmentator = new WekaSegmentation(imp);\n";
+    script += "  segmentator.loadClassifier('" + jsPath(modelPath) + "');\n";
+    script += "  var probability = segmentator.applyClassifier(imp, 0, true);\n";
+    script += "  probability.setTitle('WekaProbabilityStack');\n";
+    script += "  probability.show();\n";
+    script += "  IJ.saveAs(probability, 'Tiff', '" + jsPath(probabilityPath) + "');\n";
+    script += "  probability.setSlice(1);\n";
+    script += "  var cellProbability = new Packages.ij.ImagePlus('WekaCellProbability', probability.getProcessor().duplicate());\n";
+    script += "  cellProbability.show();\n";
+    script += "  IJ.saveAs(cellProbability, 'Tiff', '" + jsPath(classMapPath) + "');\n";
+    script += "  var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('OK'); fw.close();\n";
+    script += "} catch (e) { var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('FAIL_WEKA_PLUGIN_UNAVAILABLE\\n' + e); fw.close(); }\n";
+    eval("script", script);
+    status = File.openAsString(statusPath);
+    if (startsWith(status, "OK")) {
+        wekaFailureStatus = "";
+    } else {
+        wekaFailureStatus = "FAIL_WEKA_PLUGIN_UNAVAILABLE";
+    }
+}
+
+function jsPath(pathValue) {
+    fixed = replace(pathValue, "\\", "/");
+    fixed = replace(fixed, "'", "\\'");
+    return fixed;
+}
 
 function saveDebugImage(title, fileName) {
     requireWindow(title);

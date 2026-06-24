@@ -43,6 +43,9 @@ DEBUG_OUTPUTS = [
     "debug_edge_evidence_mask.tif",
     "debug_candidate_mask_raw.tif",
     "debug_candidate_mask_cleaned.tif",
+    "debug_weka_probability_map.tif",
+    "debug_weka_class_map.tif",
+    "weka_status.txt",
 ]
 
 FINAL_OUTPUT_MAP = {
@@ -672,7 +675,7 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     fiji_input = prepare_fiji_input(image, output)
     if weka_model is not None and not weka_model.exists():
         macro_arg, _ = build_macro_arg(fiji_input, image, output, project, {**params, "weka_model": str(weka_model)})
-        write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, params)
+        write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, {**params, "weka_model": str(weka_model)})
         write_weka_missing_outputs(output, image, image.stem, weka_model, params)
         finished = datetime.now()
         return {
@@ -695,7 +698,7 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     macro_params = params if weka_model is None else {**params, "weka_model": str(weka_model)}
     macro_arg, _ = build_macro_arg(fiji_input, image, output, project, macro_params)
     cmd = [str(fiji), "--headless", "-macro", str(macro), macro_arg]
-    write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, params)
+    write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, macro_params)
 
     timed_out = False
     returncode = 1
