@@ -438,6 +438,56 @@ def read_image_dimensions(path: Path) -> tuple[int, int]:
 
 
 def read_tiff_mask_stats(path: Path) -> dict[str, int]:
+    if importlib.util.find_spec("PIL") is not None:
+        return read_tiff_mask_stats_with_pillow(path)
+    if importlib.util.find_spec("tifffile") is not None:
+        return read_tiff_mask_stats_with_tifffile(path)
+    if importlib.util.find_spec("imageio") is not None:
+        return read_tiff_mask_stats_with_imageio(path)
+    return read_uncompressed_tiff_mask_stats(path)
+
+
+def mask_array_stats(array: Any, path: Path) -> dict[str, int]:
+    shape = array.shape
+    if len(shape) == 3 and shape[-1] != 1:
+        raise ValueError(f"Mask appears to have {shape[-1]} samples per pixel, expected one channel: {path}")
+    if len(shape) == 3:
+        array = array[..., 0]
+    height, width = array.shape[:2]
+    nonzero = int((array != 0).sum())
+    bits = int(getattr(array.dtype, "itemsize", 1) * 8)
+    return {"width": int(width), "height": int(height), "nonzero": nonzero, "samples": 1, "bits": bits}
+
+
+def read_tiff_mask_stats_with_tifffile(path: Path) -> dict[str, int]:
+    import tifffile
+
+    return mask_array_stats(tifffile.imread(path), path)
+
+
+def read_tiff_mask_stats_with_imageio(path: Path) -> dict[str, int]:
+    import imageio.v3 as iio
+
+    return mask_array_stats(iio.imread(path), path)
+
+
+def read_tiff_mask_stats_with_pillow(path: Path) -> dict[str, int]:
+    from PIL import Image
+
+    with Image.open(path) as image:
+        width, height = image.size
+        bands = image.getbands()
+        samples = len(bands)
+        if samples != 1:
+            raise ValueError(f"Mask appears to have {samples} samples per pixel, expected one channel: {path}")
+        bits = image.tag_v2.get(258, 8)
+        if isinstance(bits, tuple):
+            bits = bits[0]
+        nonzero = sum(1 for value in image.getdata() if value != 0)
+    return {"width": width, "height": height, "nonzero": nonzero, "samples": samples, "bits": int(bits)}
+
+
+def read_uncompressed_tiff_mask_stats(path: Path) -> dict[str, int]:
     data = path.read_bytes()
     if data[:2] not in {b"II", b"MM"}:
         raise ValueError(f"Expected TIFF mask: {path}")
@@ -461,7 +511,7 @@ def read_tiff_mask_stats(path: Path) -> dict[str, int]:
     compression = tags.get(259, (0, 0, 1))[2]
     samples = tags.get(277, (0, 0, 1))[2]
     if compression != 1:
-        raise ValueError(f"Compressed TIFF mask is not supported for QC validation: {path}")
+        raise ValueError(f"Compressed TIFF mask requires Pillow for QC validation: {path}")
     if samples != 1:
         raise ValueError(f"Mask appears to have {samples} samples per pixel, expected one channel: {path}")
     strip_offset = tags.get(273, (0, 0, 0))[2]
