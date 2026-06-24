@@ -15,9 +15,11 @@ from .data_io import write_text_report
 @dataclass
 class PreprocessingResult:
     standardized_features: pd.DataFrame | None = None
+    scaler: StandardScaler | None = None
     feature_columns_before: list[str] = field(default_factory=list)
     feature_columns_after: list[str] = field(default_factory=list)
     excluded_columns: list[str] = field(default_factory=list)
+    removed_features_reasons: dict[str, str] = field(default_factory=dict)
     removed_rows: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -57,6 +59,10 @@ def preprocess_features(dataframe: pd.DataFrame, output_dir: str | Path, config:
     non_numeric_excluded = [column for column in candidate_columns if column not in numeric_features]
     result.feature_columns_before = numeric_features.copy()
     result.excluded_columns = sorted(excluded) + non_numeric_excluded
+    for column in sorted(excluded):
+        result.removed_features_reasons[column] = "service/excluded column"
+    for column in non_numeric_excluded:
+        result.removed_features_reasons[column] = "non-numeric column"
 
     features = dataframe[numeric_features].copy()
     identifiers = dataframe[service_columns].copy()
@@ -65,6 +71,8 @@ def preprocess_features(dataframe: pd.DataFrame, output_dir: str | Path, config:
     if empty_features:
         features = features.drop(columns=empty_features)
         result.excluded_columns.extend(empty_features)
+        for column in empty_features:
+            result.removed_features_reasons[column] = "fully empty feature"
         result.warnings.append(f"Removed fully empty feature(s): {', '.join(empty_features)}")
 
     strategy = config.missing_value_strategy
@@ -92,6 +100,8 @@ def preprocess_features(dataframe: pd.DataFrame, output_dir: str | Path, config:
             columns_with_missing = features.columns[features.isna().any(axis=0)].tolist()
             features = features.drop(columns=columns_with_missing)
             result.excluded_columns.extend(columns_with_missing)
+            for column in columns_with_missing:
+                result.removed_features_reasons[column] = "missing values"
             result.warnings.append(f"Removed feature(s) with missing values: {', '.join(columns_with_missing)}")
         elif strategy == "replace_mean":
             features = features.fillna(features.mean(numeric_only=True))
@@ -101,6 +111,8 @@ def preprocess_features(dataframe: pd.DataFrame, output_dir: str | Path, config:
         if zero_variance_features:
             features = features.drop(columns=zero_variance_features)
             result.excluded_columns.extend(zero_variance_features)
+            for column in zero_variance_features:
+                result.removed_features_reasons[column] = "zero variance"
             result.warnings.append(f"Removed zero-variance feature(s): {', '.join(zero_variance_features)}")
 
     if len(identifiers) < 2:
@@ -115,6 +127,7 @@ def preprocess_features(dataframe: pd.DataFrame, output_dir: str | Path, config:
         scaler = StandardScaler()
         transformed = scaler.fit_transform(features)
         transformed_features = pd.DataFrame(transformed, columns=features.columns, index=features.index)
+        result.scaler = scaler
     else:
         transformed_features = features.copy()
 

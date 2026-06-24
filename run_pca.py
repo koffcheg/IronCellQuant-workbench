@@ -1,4 +1,4 @@
-"""CLI entry point for independent PCA preprocessing."""
+"""CLI entry point for independent PCA preprocessing and analysis."""
 
 from __future__ import annotations
 
@@ -7,13 +7,14 @@ from pathlib import Path
 import sys
 
 from pca_analysis.config import load_config
+from pca_analysis.analysis import run_pca_analysis
 from pca_analysis.data_io import ensure_output_dir
 from pca_analysis.preprocessing import preprocess_features
 from pca_analysis.validation import validate_input
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate and preprocess a FeatureMatrix CSV for PCA.")
+    parser = argparse.ArgumentParser(description="Validate, preprocess, and run PCA for a FeatureMatrix CSV.")
     parser.add_argument("--input", required=True, help="Path to FeatureMatrix CSV.")
     parser.add_argument("--output", required=True, help="Output directory for reports and standardized features.")
     parser.add_argument("--config", help="Optional JSON config path.")
@@ -41,7 +42,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Preprocessing failed. See: {output_dir / 'Feature_Preprocessing_Report.txt'}", file=sys.stderr)
         return 1
 
-    print(f"Preprocessing completed. Output: {output_dir}")
+    analysis_result = run_pca_analysis(
+        Path(args.input),
+        output_dir,
+        config,
+        validation_result,
+        preprocessing_result,
+    )
+    if not analysis_result.succeeded:
+        for error in analysis_result.errors:
+            print(f"PCA analysis error: {error}", file=sys.stderr)
+        return 1
+
+    print(f"PCA analysis completed. Output: {output_dir}")
     return 0
 
 
