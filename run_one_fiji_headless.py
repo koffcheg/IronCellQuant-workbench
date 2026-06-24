@@ -31,6 +31,16 @@ OVERLAY_EXPECTED_OUTPUTS = [
     "blue_inside_cells.tif",
 ]
 
+FINAL_OUTPUT_MAP = {
+    "cellmask.tif": "cellmask_{image_name}.tif",
+    "vis_cellpixels.png": "vis_cellpixels_{image_name}.png",
+    "roi_overlay.jpg": "roi_overlay_{image_name}.jpg",
+    "blue_inside_cells.tif": "blue_inside_cells_{image_name}.tif",
+    "blue_table.xlsx": "blue_table_{image_name}.xlsx",
+    "cell_features.csv": "cell_features_{image_name}.csv",
+    "frame_features.csv": "frame_features_{image_name}.csv",
+}
+
 DEFAULT_PARAMS = {
     "threshold_method": "Li",
     "threshold_mode": "dark",
@@ -241,7 +251,7 @@ def validate_expected_outputs(output: Path, params: dict[str, str], started: dat
     return missing, stale, empty
 
 
-def write_blue_pixels_xlsx(output: Path, image_name: str) -> None:
+def write_blue_pixels_xlsx(output: Path) -> None:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -250,7 +260,15 @@ def write_blue_pixels_xlsx(output: Path, image_name: str) -> None:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
 
-    object_rows = [row for row in rows if row.get("object_id") != "frame"]
+    object_rows = [
+        row for row in rows
+        if row.get("object_id") != "frame" and not row.get("object_type", "").startswith("all_")
+    ]
+    for row in object_rows:
+        object_pixels = float(row.get("object_pixels") or 0)
+        blue_pixels = float(row.get("blue_pixels") or 0)
+        if blue_pixels > object_pixels:
+            raise ValueError(f"blue_pixels exceeds object_pixels for object_id={row.get('object_id')}")
     object_rows.sort(key=lambda row: float(row.get("blue_pixel_percent") or 0), reverse=True)
     columns = [
         "image_name",
@@ -299,7 +317,6 @@ def write_blue_pixels_xlsx(output: Path, image_name: str) -> None:
         row[0].number_format = "0.00000000"
         row[1].number_format = "0.0000"
     workbook.save(output / "blue_table.xlsx")
-    workbook.save(output / f"blue_table_{image_name}.xlsx")
 
 
 def coerce_cell(value: str) -> Any:
@@ -353,8 +370,16 @@ def write_frame_features(output: Path) -> None:
         writer.writerow(row)
 
 
+def copy_final_named_outputs(output: Path, image_name: str) -> None:
+    for source_name, target_template in FINAL_OUTPUT_MAP.items():
+        source = output / source_name
+        if source.exists():
+            shutil.copy2(source, output / target_template.format(image_name=image_name))
+
+
 def postprocess_outputs(output: Path, image_name: str) -> None:
-    write_blue_pixels_xlsx(output, image_name)
+    write_blue_pixels_xlsx(output)
+    copy_final_named_outputs(output, image_name)
     # frame_features.csv is written by the macro; no PCA file is produced in Stage 1.
 
 def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) -> None:
