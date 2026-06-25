@@ -151,6 +151,7 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
             f"blue_table_{image_stem}.xlsx",
             f"cell_features_{image_stem}.csv",
             f"frame_features_{image_stem}.csv",
+            f"selection_review_candidates_{image_stem}.csv",
         ])
     if bool_param(params.get("save_overlays", "true")):
         outputs.extend(OVERLAY_EXPECTED_OUTPUTS)
@@ -170,6 +171,7 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
         f"blue_table_{image_stem}.xlsx",
         f"cell_features_{image_stem}.csv",
         f"frame_features_{image_stem}.csv",
+        f"selection_review_candidates_{image_stem}.csv",
     ]
     if bool_param(params.get("save_overlays", "true")):
         outputs.extend([
@@ -178,6 +180,7 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
             f"roi_overlay_{image_stem}.jpg",
             f"selected_objects_overlay_{image_stem}.jpg",
             f"selected_objects_contact_sheet_{image_stem}.jpg",
+            f"review_candidates_contact_sheet_{image_stem}.jpg",
             f"blue_inside_cells_{image_stem}.tif",
         ])
     return outputs
@@ -807,12 +810,125 @@ def write_selected_contact_sheet(output: Path, image_stem: str, original_image: 
     sheet.save(output / f"selected_objects_contact_sheet_{image_stem}.jpg", quality=90)
 
 
+def read_qc_status(output: Path, image_stem: str) -> str:
+    summary_path = output / f"frame_features_{image_stem}.csv"
+    if not summary_path.exists():
+        summary_path = output / "final_frame_summary.csv"
+    if not summary_path.exists():
+        return ""
+    with summary_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    return rows[0].get("qc_status", "") if rows else ""
+
+
+def write_selection_review_candidates(output: Path, image_stem: str) -> None:
+    features_path = output / f"cell_features_{image_stem}.csv"
+    review_path = output / f"selection_review_candidates_{image_stem}.csv"
+    qc_status = read_qc_status(output, image_stem)
+    fieldnames = [
+        "image_name",
+        "frame_id",
+        "object_id",
+        "feature_row_id",
+        "selected_for_frame_summary",
+        "accepted_status",
+        "candidate_status",
+        "object_pixels",
+        "blue_pixels",
+        "blue_pixel_percent",
+        "bbox_x",
+        "bbox_y",
+        "bbox_w",
+        "bbox_h",
+        "selection_rank_size",
+        "selection_rank_blue",
+        "selection_score",
+        "selection_penalty_full_blue",
+        "warn_full_blue_candidate",
+        "selection_review_note",
+        "qc_status",
+        "review_label",
+        "review_reason",
+        "review_note",
+    ]
+    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+        accepted_rows = [
+            row for row in csv.DictReader(f)
+            if str(row.get("accepted_status", "")).strip().lower() == "accepted_cell_candidate"
+        ]
+    with review_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in accepted_rows:
+            review_row = {name: row.get(name, "") for name in fieldnames}
+            review_row["qc_status"] = qc_status
+            review_row["review_label"] = ""
+            review_row["review_reason"] = ""
+            review_row["review_note"] = ""
+            writer.writerow(review_row)
+    validate_public_metadata(review_path)
+
+
+def write_review_candidates_contact_sheet(output: Path, image_stem: str, original_image: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    features_path = output / f"cell_features_{image_stem}.csv"
+    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = [
+            row for row in csv.DictReader(f)
+            if str(row.get("accepted_status", "")).strip().lower() == "accepted_cell_candidate"
+        ]
+    rows.sort(key=lambda row: (float(row.get("selection_rank_size") or 999999), float(row.get("selection_rank_blue") or 999999)))
+
+    thumb_w = 220
+    thumb_h = 160
+    label_h = 88
+    cols = 4
+    rows_count = max(1, (len(rows) + cols - 1) // cols)
+    sheet = Image.new("RGB", (cols * thumb_w, rows_count * (thumb_h + label_h)), "white")
+    draw = ImageDraw.Draw(sheet)
+
+    with Image.open(original_image) as source:
+        source = source.convert("RGB")
+        for idx, row in enumerate(rows):
+            bbox_x = int(float(row.get("bbox_x") or 0))
+            bbox_y = int(float(row.get("bbox_y") or 0))
+            bbox_w = int(float(row.get("bbox_w") or row.get("bbox_width") or 1))
+            bbox_h = int(float(row.get("bbox_h") or row.get("bbox_height") or 1))
+            pad = 12
+            left = max(0, bbox_x - pad)
+            top = max(0, bbox_y - pad)
+            right = min(source.width, bbox_x + bbox_w + pad)
+            bottom = min(source.height, bbox_y + bbox_h + pad)
+            crop = source.crop((left, top, right, bottom))
+            crop.thumbnail((thumb_w, thumb_h))
+            col = idx % cols
+            row_index = idx // cols
+            x0 = col * thumb_w
+            y0 = row_index * (thumb_h + label_h)
+            sheet.paste(crop, (x0 + (thumb_w - crop.width) // 2, y0))
+            selected = str(row.get("selected_for_frame_summary", "")).lower() == "true"
+            label = (
+                f"#{row.get('object_id')} selected={selected}\n"
+                f"size_rank={row.get('selection_rank_size')} blue_rank={row.get('selection_rank_blue')}\n"
+                f"px={row.get('object_pixels')} blue%={row.get('blue_pixel_percent')}\n"
+                f"bbox=({bbox_x},{bbox_y},{bbox_w},{bbox_h})"
+            )
+            draw.multiline_text((x0 + 4, y0 + thumb_h + 4), label, fill=(0, 0, 0), spacing=2)
+
+    if not rows:
+        draw.text((10, 10), "No accepted candidate objects", fill=(0, 0, 0))
+    sheet.save(output / f"review_candidates_contact_sheet_{image_stem}.jpg", quality=90)
+
+
 def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str], short_path_used: str) -> None:
     write_blue_pixels_xlsx(output)
     copy_final_named_outputs(output, image_stem)
     normalize_public_outputs_metadata(output, image_stem, original_image, short_path_used)
+    write_selection_review_candidates(output, image_stem)
     if bool_param(params.get("save_overlays", "true")):
         write_selected_contact_sheet(output, image_stem, original_image)
+        write_review_candidates_contact_sheet(output, image_stem, original_image)
     move_internal_outputs(output)
     validate_frame_summary(output)
     validate_cell_feature_table(output)
@@ -887,6 +1003,7 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     write_simple_png(output / f"roi_overlay_{image_stem}.jpg", width, height, (80, 0, 0))
     write_simple_png(output / f"selected_objects_overlay_{image_stem}.jpg", width, height, (0, 80, 80))
     write_simple_png(output / f"selected_objects_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
+    write_simple_png(output / f"review_candidates_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
 
     cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
     (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
@@ -899,6 +1016,7 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     summary_row = f"{image.name},{width},{height},0,0,0,0,{failure_status}\n"
     (output / "final_frame_summary.csv").write_text(summary_header + summary_row, encoding="utf-8-sig")
     shutil.copy2(output / "final_frame_summary.csv", output / f"frame_features_{image_stem}.csv")
+    write_selection_review_candidates(output, image_stem)
     report = (
         "# IronCellQuant single-frame QC report\n\n"
         f"## Status\n\n{failure_status}\n\n"

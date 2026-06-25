@@ -928,6 +928,10 @@ function writeQcReport(qcStatus) {
     report += "The measured feature is preliminary relative optical blue_pixel_fraction, not a calibrated concentration measurement.\n";
     report += "Bounding boxes are loop limits only; pixel membership is checked through selectionContains(x,y).\n";
     report += "Weka is treated as a cell-material candidate generator; blue pixels are measured only inside accepted cell-material regions and near-full-blue candidates are penalized unless size/shape context is plausible.\n";
+    if (indexOf(qcStatus, "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE") >= 0 || indexOf(qcStatus, "WARN_MANY_FULL_BLUE_OBJECTS") >= 0 || indexOf(qcStatus, "WARN_HIGH_ACCEPTED_OBJECT_COUNT") >= 0) {
+        report += "Biological interpretation requires reviewer validation using selection_review_candidates_<image_stem>.csv and review_candidates_contact_sheet_<image_stem>.jpg before batch analysis.\n";
+        report += "Suggested review_label values: include_cell_material, include_aggregate, exclude_blue_background, exclude_full_blue_artifact, exclude_border_or_metadata, exclude_noise, uncertain.\n";
+    }
     if (acceptedCount == 0) report += "This run is a detector/QC failure, not a successful biological Stage 1A result; use the generated files only for debugging and Stage 1B detector planning.\n";
     File.saveString(report, outputDir + "/extended_qc_report.md");
 }
