@@ -1067,24 +1067,74 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
     selection_pool.sort(key=lambda row: (as_float(row.get("selection_score"), 999999999), as_float(row.get("selection_rank_blue"), 999999), -as_float(row.get("object_pixels"))))
     frame_select_top_blue = int(as_float(params.get("frame_select_top_blue"), 20))
     max_near_full_blue = int(as_float(params.get("frame_select_max_near_full_blue"), 5))
+    max_near_full_pixel_fraction = 0.25
     selected_rows: list[dict[str, str]] = []
     near_full_selected = 0
+    near_full_selected_pixels = 0.0
+    near_full_selected_blue = 0.0
+
     for row in selection_pool:
         if len(selected_rows) >= frame_select_top_blue:
             break
-        is_near_full = as_float(row.get("blue_pixel_percent")) >= 99
-        if is_near_full and near_full_selected >= max_near_full_blue:
-            row["auto_roi_selection_note"] = "not_selected_near_full_blue_cap_reached"
+        if as_float(row.get("blue_pixel_percent")) >= 99:
             continue
         selected_rows.append(row)
-        if is_near_full:
-            near_full_selected += 1
+
+    selected_pixels = sum(as_float(row.get("object_pixels")) for row in selected_rows)
+    selected_blue = sum(as_float(row.get("blue_pixels")) for row in selected_rows)
+    for row in selection_pool:
+        if len(selected_rows) >= frame_select_top_blue:
+            break
+        if as_float(row.get("blue_pixel_percent")) < 99:
+            continue
+        if str(row.get("selection_review_note", "")) == "strongly_deprioritized_nearly_full_blue_artifact_risk":
+            row["auto_roi_selection_note"] = "not_selected_strong_near_full_blue_artifact_risk"
+            continue
+        if near_full_selected >= max_near_full_blue:
+            row["auto_roi_selection_note"] = "not_selected_near_full_blue_cap_reached"
+            continue
+        candidate_pixels = as_float(row.get("object_pixels"))
+        candidate_blue = as_float(row.get("blue_pixels"))
+        next_pixels = selected_pixels + candidate_pixels
+        next_blue = selected_blue + candidate_blue
+        next_near_full_pixels = near_full_selected_pixels + candidate_pixels
+        next_near_full_blue = near_full_selected_blue + candidate_blue
+        if next_pixels > 0 and next_near_full_pixels / next_pixels > max_near_full_pixel_fraction:
+            row["auto_roi_selection_note"] = "not_selected_near_full_blue_pixel_mass_cap"
+            continue
+        if next_blue > 0 and next_near_full_blue / next_blue > max_near_full_pixel_fraction:
+            row["auto_roi_selection_note"] = "not_selected_near_full_blue_blue_mass_cap"
+            continue
+        selected_rows.append(row)
+        selected_pixels = next_pixels
+        selected_blue = next_blue
+        near_full_selected_pixels = next_near_full_pixels
+        near_full_selected_blue = next_near_full_blue
+        near_full_selected += 1
+
+    fallback_strong_near_full = False
+    if not selected_rows and selection_pool:
+        fallback = selection_pool[0]
+        selected_rows.append(fallback)
+        fallback_strong_near_full = str(fallback.get("selection_review_note", "")) == "strongly_deprioritized_nearly_full_blue_artifact_risk"
+        fallback["auto_roi_selection_note"] = "fallback_selected_no_alternative_candidates"
+
     for row in selected_rows:
         row["selected_for_frame_summary"] = "true"
-        if proposals:
+        if proposals and row.get("auto_roi_selection_note") != "fallback_selected_no_alternative_candidates":
             row["auto_roi_selection_note"] = "selected_inside_auto_roi"
     rewrite_csv_rows(features_path, rows, fieldnames)
     qc_status = rewrite_frame_summary_selection(output, image_stem, selected_rows, proposals)
+    if fallback_strong_near_full:
+        qc_status = append_qc_status(qc_status, "WARN_FALLBACK_SELECTED_STRONG_NEAR_FULL_BLUE_ARTIFACT_RISK")
+        summary_path = output / f"frame_features_{image_stem}.csv"
+        with summary_path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            summary_fieldnames = list(reader.fieldnames or [])
+            summary_rows = list(reader)
+        if summary_rows:
+            summary_rows[0]["qc_status"] = qc_status
+            rewrite_csv_rows(summary_path, summary_rows, summary_fieldnames)
     write_roi_proposals_csv(output, image_stem, proposals)
     write_roi_proposals_overlay(output, image_stem, original_image, proposals)
     return proposals, qc_status
