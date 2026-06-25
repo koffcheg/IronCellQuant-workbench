@@ -735,7 +735,7 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     write_simple_png(output / f"vis_cellpixels_{image_stem}.png", width, height, (80, 0, 80))
     write_simple_png(output / f"roi_overlay_{image_stem}.jpg", width, height, (80, 0, 0))
 
-    cell_header = "image_name,group_name,original_long_path,short_path_used,object_id,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
+    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
     (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
     shutil.copy2(output / "cell_features.csv", output / f"cell_features_{image_stem}.csv")
     (output / "blue_pixels_features.csv").write_text("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", encoding="utf-8-sig")
