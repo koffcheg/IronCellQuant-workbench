@@ -4,6 +4,8 @@ import argparse
 import csv
 import os
 import shutil
+import importlib.util
+import zlib
 import subprocess
 from datetime import datetime
 from typing import Any
@@ -16,52 +18,70 @@ ALWAYS_EXPECTED_OUTPUTS = [
     "rejected_objects.csv",
     "cell_features.csv",
     "blue_pixels_features.csv",
-    "blue_table.xlsx",
-    "frame_features.csv",
+    "final_frame_summary.csv",
     "extended_qc_report.md",
     "run_parameters.txt",
     "run_parameters.csv",
     "macro_log.txt",
 ]
 
+RUNNER_WRITTEN_OUTPUTS = {
+    "run_parameters.txt",
+    "run_parameters.csv",
+    "macro_log.txt",
+}
+
 OVERLAY_EXPECTED_OUTPUTS = [
     "cellmask.tif",
     "vis_cellpixels.png",
     "roi_overlay.jpg",
+    "selected_objects_overlay.jpg",
     "blue_inside_cells.tif",
 ]
 
+DEBUG_OUTPUTS = [
+    "debug_texture_evidence_mask.tif",
+    "debug_edge_evidence_mask.tif",
+    "debug_candidate_mask_raw.tif",
+    "debug_candidate_mask_cleaned.tif",
+    "debug_weka_probability_map.tif",
+    "debug_weka_class_map.tif",
+    "debug_weka_tile_mask_raw.tif",
+    "weka_status.txt",
+]
+
 FINAL_OUTPUT_MAP = {
-    "cellmask.tif": "cellmask_{image_name}.tif",
-    "vis_cellpixels.png": "vis_cellpixels_{image_name}.png",
-    "roi_overlay.jpg": "roi_overlay_{image_name}.jpg",
-    "blue_inside_cells.tif": "blue_inside_cells_{image_name}.tif",
-    "blue_table.xlsx": "blue_table_{image_name}.xlsx",
-    "cell_features.csv": "cell_features_{image_name}.csv",
-    "frame_features.csv": "frame_features_{image_name}.csv",
+    "cellmask.tif": "cellmask_{image_stem}.tif",
+    "vis_cellpixels.png": "vis_cellpixels_{image_stem}.png",
+    "roi_overlay.jpg": "roi_overlay_{image_stem}.jpg",
+    "selected_objects_overlay.jpg": "selected_objects_overlay_{image_stem}.jpg",
+    "blue_inside_cells.tif": "blue_inside_cells_{image_stem}.tif",
+    "blue_table.xlsx": "blue_table_{image_stem}.xlsx",
+    "cell_features.csv": "cell_features_{image_stem}.csv",
+    "final_frame_summary.csv": "frame_features_{image_stem}.csv",
 }
 
 DEFAULT_PARAMS = {
     "threshold_method": "Li",
-    "threshold_mode": "dark",
+    "threshold_mode": "bright",
     "background_rolling": "80",
     "median_radius": "2",
     "contrast_saturated": "0.35",
     "morph_open_iterations": "0",
-    "morph_close_iterations": "1",
+    "morph_close_iterations": "2",
     "fill_holes": "true",
     "metadata_bar_height": "120",
-    "particle_extract_min_area": "10",
+    "particle_extract_min_area": "100",
     "particle_extract_max_area": "2000000",
-    "min_noise_area": "10",
-    "min_single_cell_area": "40",
-    "max_single_cell_area": "50000",
-    "min_aggregate_area": "50000",
+    "min_noise_area": "100",
+    "min_single_cell_area": "200",
+    "max_single_cell_area": "3000",
+    "min_aggregate_area": "3000",
     "max_aggregate_area": "2000000",
-    "max_single_cell_aspect": "10",
-    "max_aggregate_aspect": "30",
+    "max_single_cell_aspect": "4",
+    "max_aggregate_aspect": "8",
     "exclude_border_objects": "true",
-    "border_margin_px": "2",
+    "border_margin_px": "20",
     "blue_min": "120",
     "blue_over_red": "20",
     "blue_over_green": "10",
@@ -72,7 +92,12 @@ DEFAULT_PARAMS = {
     "final_overlay_preview_max_size": "1600",
     "min_expected_accepted_objects": "1",
     "min_stable_accepted_objects": "3",
+    "max_stable_accepted_objects": "40",
     "min_stable_accepted_pixels": "500",
+    "weka_tile_size": "768",
+    "weka_tile_overlap": "64",
+    "frame_select_top_size": "40",
+    "frame_select_top_blue": "20",
 }
 
 
@@ -117,23 +142,42 @@ def discover_default_input(project: Path) -> Path:
     return project / "input" / "52_proto1.bmp"
 
 
-def expected_outputs(params: dict[str, str], image_name: str | None = None) -> list[str]:
+def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> list[str]:
     outputs = list(ALWAYS_EXPECTED_OUTPUTS)
-    if image_name:
+    if image_stem:
         outputs.extend([
-            f"blue_table_{image_name}.xlsx",
-            f"cell_features_{image_name}.csv",
-            f"frame_features_{image_name}.csv",
+            f"blue_table_{image_stem}.xlsx",
+            f"cell_features_{image_stem}.csv",
+            f"frame_features_{image_stem}.csv",
         ])
     if bool_param(params.get("save_overlays", "true")):
         outputs.extend(OVERLAY_EXPECTED_OUTPUTS)
-        if image_name:
+        if image_stem:
             outputs.extend([
-                f"cellmask_{image_name}.tif",
-                f"vis_cellpixels_{image_name}.png",
-                f"roi_overlay_{image_name}.jpg",
-                f"blue_inside_cells_{image_name}.tif",
+                f"cellmask_{image_stem}.tif",
+                f"vis_cellpixels_{image_stem}.png",
+                f"roi_overlay_{image_stem}.jpg",
+                f"selected_objects_overlay_{image_stem}.jpg",
+                f"blue_inside_cells_{image_stem}.tif",
             ])
+    return outputs
+
+
+def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]:
+    outputs = [
+        f"blue_table_{image_stem}.xlsx",
+        f"cell_features_{image_stem}.csv",
+        f"frame_features_{image_stem}.csv",
+    ]
+    if bool_param(params.get("save_overlays", "true")):
+        outputs.extend([
+            f"cellmask_{image_stem}.tif",
+            f"vis_cellpixels_{image_stem}.png",
+            f"roi_overlay_{image_stem}.jpg",
+            f"selected_objects_overlay_{image_stem}.jpg",
+            f"selected_objects_contact_sheet_{image_stem}.jpg",
+            f"blue_inside_cells_{image_stem}.tif",
+        ])
     return outputs
 
 
@@ -184,26 +228,42 @@ def create_clean_output(root: Path, prefix: str, clean: bool) -> Path:
     return output
 
 
-def build_macro_arg(image: Path, output: Path, project: Path, params: dict[str, str]) -> tuple[str, str]:
-    short_input = windows_short_path(image)
-    short_used = "true" if short_input != str(image) else "false"
+def ascii_work_suffix(image: Path) -> str:
+    suffix = image.suffix.lower()
+    if suffix and suffix.isascii() and suffix.replace(".", "", 1).isalnum():
+        return suffix
+    return ".img"
+
+
+def prepare_fiji_input(original_image: Path, output: Path) -> Path:
+    work_dir = output / "fiji_work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    fiji_input = work_dir / ("input" + ascii_work_suffix(original_image))
+    shutil.copy2(original_image, fiji_input)
+    return fiji_input
+
+
+def build_macro_arg(fiji_input: Path, original_image: Path, output: Path, project: Path, params: dict[str, str]) -> tuple[str, str]:
+    short_input = windows_short_path(fiji_input)
+    short_used = "true" if short_input != str(fiji_input) else "false"
     macro_params = {
         "input": short_input,
         "output": str(output),
-        "original_long_path": str(image),
-        "original_file_name": image.name,
-        "group_name": group_name_for(image, project),
+        "original_long_path": str(original_image),
+        "original_file_name": original_image.name,
+        "group_name": group_name_for(original_image, project),
         "short_path_used": short_used,
         **params,
     }
     return ";".join(f"{k}={v}" for k, v in macro_params.items()), short_used
 
 
-def write_run_parameters(output: Path, project: Path, image: Path, fiji: Path, macro: Path, macro_arg: str, params: dict[str, str]) -> None:
-    outputs = expected_outputs(params, image.name)
+def write_run_parameters(output: Path, project: Path, original_image: Path, fiji_input: Path, fiji: Path, macro: Path, macro_arg: str, params: dict[str, str]) -> None:
+    outputs = expected_outputs(params, original_image.stem)
     lines = [
         f"project={project}",
-        f"input={image}",
+        f"input={original_image}",
+        f"fiji_input={fiji_input}",
         f"output={output}",
         f"macro={macro}",
         f"fiji={fiji}",
@@ -218,7 +278,8 @@ def write_run_parameters(output: Path, project: Path, image: Path, fiji: Path, m
         writer.writerow(["parameter", "value"])
         for key, value in [
             ("project", project),
-            ("input", image),
+            ("input", original_image),
+            ("fiji_input", fiji_input),
             ("output", output),
             ("macro", macro),
             ("fiji", fiji),
@@ -236,11 +297,26 @@ def read_single_csv_row(path: Path) -> dict[str, str]:
     return rows[0] if rows else {}
 
 
-def validate_expected_outputs(output: Path, params: dict[str, str], started: datetime, image_name: str | None = None) -> tuple[list[str], list[str], list[str]]:
+def validate_expected_outputs(output: Path, params: dict[str, str], started: datetime, image_stem: str | None = None) -> tuple[list[str], list[str], list[str]]:
     missing: list[str] = []
     stale: list[str] = []
     empty: list[str] = []
-    for name in expected_outputs(params, image_name):
+    for name in expected_outputs(params, image_stem):
+        path = output / name
+        if not path.exists():
+            missing.append(name)
+        elif name not in RUNNER_WRITTEN_OUTPUTS and datetime.fromtimestamp(path.stat().st_mtime) < started:
+            stale.append(name)
+        elif path.stat().st_size == 0:
+            empty.append(name)
+    return missing, stale, empty
+
+
+def validate_named_outputs(output: Path, names: list[str], started: datetime) -> tuple[list[str], list[str], list[str]]:
+    missing: list[str] = []
+    stale: list[str] = []
+    empty: list[str] = []
+    for name in names:
         path = output / name
         if not path.exists():
             missing.append(name)
@@ -331,56 +407,322 @@ def coerce_cell(value: str) -> Any:
     return number
 
 
-def write_frame_features(output: Path) -> None:
-    summary = read_single_csv_row(output / "frame_features.csv")
-    fieldnames = [
-        "image_name", "width", "height", "frame_area_pixels", "component_count_total",
-        "accepted_object_count", "accepted_object_pixels", "accepted_area_fraction_of_frame",
-        "accepted_area_percent_of_frame", "accepted_blue_pixels", "blue_pixel_percent_all_accepted", "accepted_R_mean",
-        "accepted_G_mean", "accepted_B_mean", "accepted_R_std", "accepted_G_std",
-        "accepted_B_std", "accepted_B_over_R_mean", "accepted_B_over_RGB_sum_mean",
-        "accepted_gray_stddev", "qc_status",
-    ]
-    row = {
-        "image_name": summary.get("image_name", ""),
-        "width": summary.get("image_width", ""),
-        "height": summary.get("image_height", ""),
-        "frame_area_pixels": summary.get("frame_area_pixels", ""),
-        "component_count_total": summary.get("component_count_total", ""),
-        "accepted_object_count": summary.get("accepted_object_count", ""),
-        "accepted_object_pixels": summary.get("accepted_object_pixels", ""),
-        "accepted_area_fraction_of_frame": summary.get("accepted_area_fraction_of_frame", ""),
-        "accepted_area_percent_of_frame": summary.get("accepted_area_percent_of_frame", ""),
-        "accepted_blue_pixels": summary.get("accepted_blue_pixels", ""),
-        "blue_pixel_percent_all_accepted": summary.get("blue_pixel_percent_all_accepted", ""),
-        "accepted_R_mean": summary.get("accepted_R_mean", ""),
-        "accepted_G_mean": summary.get("accepted_G_mean", ""),
-        "accepted_B_mean": summary.get("accepted_B_mean", ""),
-        "accepted_R_std": summary.get("accepted_R_std", ""),
-        "accepted_G_std": summary.get("accepted_G_std", ""),
-        "accepted_B_std": summary.get("accepted_B_std", ""),
-        "accepted_B_over_R_mean": summary.get("accepted_B_over_R_mean", ""),
-        "accepted_B_over_RGB_sum_mean": summary.get("accepted_B_over_RGB_sum_mean", ""),
-        "accepted_gray_stddev": summary.get("accepted_gray_stddev", ""),
-        "qc_status": summary.get("qc_status", ""),
+def read_image_dimensions(path: Path) -> tuple[int, int]:
+    with path.open("rb") as f:
+        header = f.read(32)
+        if header.startswith(b"\x89PNG\r\n\x1a\n"):
+            return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+        if header[:2] == b"BM":
+            return int.from_bytes(header[18:22], "little", signed=True), abs(int.from_bytes(header[22:26], "little", signed=True))
+        if header[:2] in {b"II", b"MM"}:
+            endian = "little" if header[:2] == b"II" else "big"
+            f.seek(int.from_bytes(header[4:8], endian))
+            count = int.from_bytes(f.read(2), endian)
+            width = height = 0
+            for _ in range(count):
+                entry = f.read(12)
+                tag = int.from_bytes(entry[0:2], endian)
+                value = int.from_bytes(entry[8:12], endian)
+                if tag == 256:
+                    width = value
+                elif tag == 257:
+                    height = value
+            if width and height:
+                return width, height
+        if header[:2] == b"\xff\xd8":
+            f.seek(2)
+            while True:
+                marker = f.read(2)
+                while marker[:1] != b"\xff":
+                    marker = marker[1:] + f.read(1)
+                code = marker[1]
+                length = int.from_bytes(f.read(2), "big")
+                if 0xC0 <= code <= 0xC3 or 0xC5 <= code <= 0xC7 or 0xC9 <= code <= 0xCB or 0xCD <= code <= 0xCF:
+                    data = f.read(5)
+                    return int.from_bytes(data[3:5], "big"), int.from_bytes(data[1:3], "big")
+                f.seek(length - 2, 1)
+    raise ValueError(f"Unsupported image format for dimension validation: {path}")
+
+
+def read_tiff_mask_stats(path: Path) -> dict[str, int]:
+    if importlib.util.find_spec("PIL") is not None:
+        return read_tiff_mask_stats_with_pillow(path)
+    if importlib.util.find_spec("tifffile") is not None:
+        return read_tiff_mask_stats_with_tifffile(path)
+    if importlib.util.find_spec("imageio") is not None:
+        return read_tiff_mask_stats_with_imageio(path)
+    return read_uncompressed_tiff_mask_stats(path)
+
+
+def mask_array_stats(array: Any, path: Path) -> dict[str, int]:
+    shape = array.shape
+    if len(shape) == 3 and shape[-1] != 1:
+        raise ValueError(f"Mask appears to have {shape[-1]} samples per pixel, expected one channel: {path}")
+    if len(shape) == 3:
+        array = array[..., 0]
+    height, width = array.shape[:2]
+    unique_values = set()
+    for value in array.flat:
+        unique_values.add(int(value))
+        if len(unique_values) > 2:
+            raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
+    nonzero = int((array != 0).sum())
+    bits = int(getattr(array.dtype, "itemsize", 1) * 8)
+    return {"width": int(width), "height": int(height), "nonzero": nonzero, "samples": 1, "bits": bits}
+
+
+def read_tiff_mask_stats_with_tifffile(path: Path) -> dict[str, int]:
+    import tifffile
+
+    return mask_array_stats(tifffile.imread(path), path)
+
+
+def read_tiff_mask_stats_with_imageio(path: Path) -> dict[str, int]:
+    import imageio.v3 as iio
+
+    return mask_array_stats(iio.imread(path), path)
+
+
+def read_tiff_mask_stats_with_pillow(path: Path) -> dict[str, int]:
+    from PIL import Image
+
+    with Image.open(path) as image:
+        width, height = image.size
+        bands = image.getbands()
+        samples = len(bands)
+        if samples != 1:
+            raise ValueError(f"Mask appears to have {samples} samples per pixel, expected one channel: {path}")
+        bits = image.tag_v2.get(258, 8)
+        if isinstance(bits, tuple):
+            bits = bits[0]
+        gray = image.convert("L")
+        histogram = gray.histogram()
+        unique_values = sum(1 for count in histogram if count > 0)
+        if unique_values > 2:
+            raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
+        nonzero = sum(histogram[1:])
+    return {"width": width, "height": height, "nonzero": nonzero, "samples": samples, "bits": int(bits)}
+
+
+def read_uncompressed_tiff_mask_stats(path: Path) -> dict[str, int]:
+    data = path.read_bytes()
+    if data[:2] not in {b"II", b"MM"}:
+        raise ValueError(f"Expected TIFF mask: {path}")
+    endian = "little" if data[:2] == b"II" else "big"
+    ifd = int.from_bytes(data[4:8], endian)
+    count = int.from_bytes(data[ifd:ifd + 2], endian)
+    tags: dict[int, tuple[int, int, int]] = {}
+    pos = ifd + 2
+    for _ in range(count):
+        entry = data[pos:pos + 12]
+        tag = int.from_bytes(entry[0:2], endian)
+        typ = int.from_bytes(entry[2:4], endian)
+        num = int.from_bytes(entry[4:8], endian)
+        val = int.from_bytes(entry[8:12], endian)
+        tags[tag] = (typ, num, val)
+        pos += 12
+
+    width = tags.get(256, (0, 0, 0))[2]
+    height = tags.get(257, (0, 0, 0))[2]
+    bits = tags.get(258, (0, 0, 8))[2]
+    compression = tags.get(259, (0, 0, 1))[2]
+    samples = tags.get(277, (0, 0, 1))[2]
+    if compression != 1:
+        raise ValueError(f"Compressed TIFF mask requires Pillow for QC validation: {path}")
+    if samples != 1:
+        raise ValueError(f"Mask appears to have {samples} samples per pixel, expected one channel: {path}")
+    strip_offset = tags.get(273, (0, 0, 0))[2]
+    strip_count = tags.get(279, (0, 0, 0))[2]
+    if not strip_offset or not strip_count:
+        raise ValueError(f"TIFF mask is missing strip offsets/counts: {path}")
+    pixels = data[strip_offset:strip_offset + strip_count]
+    unique_values = set()
+    if bits == 8:
+        nonzero = 0
+        for value in pixels:
+            unique_values.add(int(value))
+            if len(unique_values) > 2:
+                raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
+            if value != 0:
+                nonzero += 1
+    elif bits == 16:
+        nonzero = 0
+        for i in range(0, len(pixels), 2):
+            value = int.from_bytes(pixels[i:i+2], endian)
+            unique_values.add(value)
+            if len(unique_values) > 2:
+                raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
+            if value != 0:
+                nonzero += 1
+    else:
+        raise ValueError(f"Unsupported TIFF mask bit depth {bits}: {path}")
+    return {"width": width, "height": height, "nonzero": nonzero, "samples": samples, "bits": bits}
+
+
+def images_effectively_same(path_a: Path, path_b: Path) -> bool:
+    if importlib.util.find_spec("PIL") is None:
+        return False
+    from PIL import Image, ImageChops, ImageStat
+    with Image.open(path_a) as image_a, Image.open(path_b) as image_b:
+        image_a = image_a.convert("RGB")
+        image_b = image_b.convert("RGB")
+        if image_a.size != image_b.size:
+            return False
+        diff = ImageChops.difference(image_a, image_b)
+        stat = ImageStat.Stat(diff)
+        return max(stat.mean) < 0.5
+
+
+def validate_frame_summary(output: Path) -> dict[str, float]:
+    summary_path = output / "final_frame_summary.csv"
+    if not summary_path.exists():
+        summary_path = output / "_internal" / "final_frame_summary.csv"
+    summary = read_single_csv_row(summary_path)
+    accepted_objects = float(summary.get("accepted_object_count") or 0)
+    accepted_pixels = float(summary.get("accepted_object_pixels") or 0)
+    accepted_blue = float(summary.get("accepted_blue_pixels") or 0)
+    if accepted_blue > accepted_pixels:
+        raise ValueError("accepted_blue_pixels exceeds accepted_object_pixels")
+    if accepted_objects == 0:
+        raise ValueError("accepted_object_count is zero for this expected-positive single-frame run")
+    return {
+        "accepted_object_count": accepted_objects,
+        "accepted_object_pixels": accepted_pixels,
+        "accepted_blue_pixels": accepted_blue,
     }
-    with (output / "frame_features.csv").open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerow(row)
 
 
-def copy_final_named_outputs(output: Path, image_name: str) -> None:
+def validate_output_image_dimensions(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
+    if not bool_param(params.get("save_overlays", "true")):
+        return
+    expected = read_image_dimensions(original_image)
+    final_names = [
+        f"cellmask_{image_stem}.tif",
+        f"blue_inside_cells_{image_stem}.tif",
+        f"vis_cellpixels_{image_stem}.png",
+        f"roi_overlay_{image_stem}.jpg",
+        f"selected_objects_overlay_{image_stem}.jpg",
+    ]
+    for name in final_names:
+        actual = read_image_dimensions(output / name)
+        if actual != expected:
+            raise ValueError(f"{name} dimensions {actual} do not match original image dimensions {expected}")
+    cellmask_stats = read_tiff_mask_stats(output / f"cellmask_{image_stem}.tif")
+    blue_stats = read_tiff_mask_stats(output / f"blue_inside_cells_{image_stem}.tif")
+    if cellmask_stats["nonzero"] == 0:
+        raise ValueError("accepted cellmask is empty")
+    if blue_stats["nonzero"] > cellmask_stats["nonzero"]:
+        raise ValueError("blue_inside_cells has more nonzero pixels than cellmask")
+    if images_effectively_same(original_image, output / f"vis_cellpixels_{image_stem}.png"):
+        raise ValueError("vis_cellpixels appears unchanged from the original input")
+    if images_effectively_same(original_image, output / f"roi_overlay_{image_stem}.jpg"):
+        raise ValueError("roi_overlay appears unchanged from the original input")
+
+
+def validate_cell_feature_table(output: Path) -> None:
+    path = output / "cell_features.csv"
+    if not path.exists():
+        candidates = sorted(output.glob("cell_features_*.csv"))
+        if candidates:
+            path = candidates[0]
+        else:
+            path = output / "_internal" / "cell_features.csv"
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            object_pixels = float(row.get("object_pixels") or 0)
+            blue_pixels = float(row.get("blue_pixels") or 0)
+            roi_area_pixels = float(row.get("roi_area_pixels") or 0)
+            fraction = float(row.get("blue_pixel_fraction") or 0)
+            percent = float(row.get("blue_pixel_percent") or 0)
+            if blue_pixels > object_pixels:
+                raise ValueError(f"blue_pixels exceeds object_pixels for object_id={row.get('object_id')}")
+            if object_pixels > roi_area_pixels:
+                raise ValueError(f"object_pixels exceeds roi_area_pixels for object_id={row.get('object_id')}")
+            expected_fraction = blue_pixels / object_pixels if object_pixels else 0
+            if abs(fraction - expected_fraction) > 1e-6 or abs(percent - 100 * expected_fraction) > 1e-3:
+                raise ValueError(f"blue fraction/percent mismatch for object_id={row.get('object_id')}")
+
+
+def copy_final_named_outputs(output: Path, image_stem: str) -> None:
     for source_name, target_template in FINAL_OUTPUT_MAP.items():
         source = output / source_name
         if source.exists():
-            shutil.copy2(source, output / target_template.format(image_name=image_name))
+            shutil.copy2(source, output / target_template.format(image_stem=image_stem))
 
 
-def postprocess_outputs(output: Path, image_name: str) -> None:
+def move_internal_outputs(output: Path) -> None:
+    internal = output / "_internal"
+    internal.mkdir(exist_ok=True)
+    for name in set(ALWAYS_EXPECTED_OUTPUTS + OVERLAY_EXPECTED_OUTPUTS + DEBUG_OUTPUTS + ["blue_table.xlsx", "fiji_stdout.txt", "fiji_stderr.txt", "runner_command.txt", "fiji_work"]):
+        source = output / name
+        if source.exists():
+            target = internal / name
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            shutil.move(str(source), str(target))
+
+
+def write_selected_contact_sheet(output: Path, image_stem: str, original_image: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    features_path = output / f"cell_features_{image_stem}.csv"
+    if not features_path.exists():
+        features_path = output / "cell_features.csv"
+    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = [row for row in csv.DictReader(f) if str(row.get("selected_for_frame_summary", "")).lower() == "true"]
+
+    thumb_w = 220
+    thumb_h = 160
+    label_h = 72
+    cols = 4
+    rows_count = max(1, (len(rows) + cols - 1) // cols)
+    sheet = Image.new("RGB", (cols * thumb_w, rows_count * (thumb_h + label_h)), "white")
+    draw = ImageDraw.Draw(sheet)
+
+    with Image.open(original_image) as source:
+        source = source.convert("RGB")
+        for idx, row in enumerate(rows):
+            bbox_x = int(float(row.get("bbox_x") or 0))
+            bbox_y = int(float(row.get("bbox_y") or 0))
+            bbox_w = int(float(row.get("bbox_w") or row.get("bbox_width") or 1))
+            bbox_h = int(float(row.get("bbox_h") or row.get("bbox_height") or 1))
+            pad = 12
+            left = max(0, bbox_x - pad)
+            top = max(0, bbox_y - pad)
+            right = min(source.width, bbox_x + bbox_w + pad)
+            bottom = min(source.height, bbox_y + bbox_h + pad)
+            crop = source.crop((left, top, right, bottom))
+            crop.thumbnail((thumb_w, thumb_h))
+            col = idx % cols
+            row_index = idx // cols
+            x0 = col * thumb_w
+            y0 = row_index * (thumb_h + label_h)
+            sheet.paste(crop, (x0 + (thumb_w - crop.width) // 2, y0))
+            label = (
+                f"#{row.get('object_id')} {row.get('feature_row_id')}\n"
+                f"px={row.get('object_pixels')} blue%={row.get('blue_pixel_percent')}\n"
+                f"bbox=({bbox_x},{bbox_y},{bbox_w},{bbox_h})"
+            )
+            draw.multiline_text((x0 + 4, y0 + thumb_h + 4), label, fill=(0, 0, 0), spacing=2)
+
+    if not rows:
+        draw.text((10, 10), "No selected frame-summary objects", fill=(0, 0, 0))
+    sheet.save(output / f"selected_objects_contact_sheet_{image_stem}.jpg", quality=90)
+
+
+def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
     write_blue_pixels_xlsx(output)
-    copy_final_named_outputs(output, image_name)
-    # frame_features.csv is written by the macro; no PCA file is produced in Stage 1.
+    copy_final_named_outputs(output, image_stem)
+    if bool_param(params.get("save_overlays", "true")):
+        write_selected_contact_sheet(output, image_stem, original_image)
+    move_internal_outputs(output)
+    validate_frame_summary(output)
+    validate_cell_feature_table(output)
+    validate_output_image_dimensions(output, image_stem, original_image, params)
+    # final_frame_summary.csv is written by the macro; Python copies it to the final frame_features_<original_stem>.csv name.
 
 def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) -> None:
     with (output / "macro_log.txt").open("a", encoding="utf-8", errors="replace") as f:
@@ -392,6 +734,8 @@ def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) 
 def read_last_checkpoint(output: Path) -> str:
     log_path = output / "macro_log.txt"
     if not log_path.exists():
+        log_path = output / "_internal" / "macro_log.txt"
+    if not log_path.exists():
         return ""
     last = ""
     for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -400,13 +744,116 @@ def read_last_checkpoint(output: Path) -> str:
     return last
 
 
-def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, params: dict[str, str], timeout_seconds: int) -> dict[str, str]:
+def write_simple_tiff(path: Path, width: int, height: int, fill: int = 0) -> None:
+    pixels = bytes([fill]) * width * height
+    entries = [
+        (256, 4, 1, width),
+        (257, 4, 1, height),
+        (258, 3, 1, 8),
+        (259, 3, 1, 1),
+        (273, 4, 1, 0),
+        (277, 3, 1, 1),
+        (279, 4, 1, len(pixels)),
+    ]
+    ifd_len = 2 + 12 * len(entries) + 4
+    pixel_offset = 8 + ifd_len
+    data = b"II" + (42).to_bytes(2, "little") + (8).to_bytes(4, "little") + len(entries).to_bytes(2, "little")
+    for tag, typ, count, value in entries:
+        if tag == 273:
+            value = pixel_offset
+        data += tag.to_bytes(2, "little") + typ.to_bytes(2, "little") + count.to_bytes(4, "little") + value.to_bytes(4, "little")
+    path.write_bytes(data + (0).to_bytes(4, "little") + pixels)
+
+
+def write_simple_png(path: Path, width: int, height: int, rgb: tuple[int, int, int] = (0, 0, 0)) -> None:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return len(payload).to_bytes(4, "big") + kind + payload + zlib.crc32(kind + payload).to_bytes(4, "big")
+    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def copy_hs_err_logs(output: Path) -> None:
+    internal = output / "_internal"
+    internal.mkdir(exist_ok=True)
+    roots = {Path.cwd(), output, output.parent}
+    for root in roots:
+        for log_path in root.glob("hs_err_pid*.log"):
+            target = internal / log_path.name
+            if log_path.resolve() != target.resolve():
+                shutil.copy2(log_path, target)
+
+
+def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_model: Path, params: dict[str, str], failure_status: str, detail: str) -> None:
+    width, height = read_image_dimensions(image)
+    write_simple_tiff(output / f"cellmask_{image_stem}.tif", width, height, 0)
+    write_simple_tiff(output / f"blue_inside_cells_{image_stem}.tif", width, height, 0)
+    write_simple_png(output / f"vis_cellpixels_{image_stem}.png", width, height, (80, 0, 80))
+    write_simple_png(output / f"roi_overlay_{image_stem}.jpg", width, height, (80, 0, 0))
+    write_simple_png(output / f"selected_objects_overlay_{image_stem}.jpg", width, height, (0, 80, 80))
+    write_simple_png(output / f"selected_objects_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
+
+    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
+    (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
+    shutil.copy2(output / "cell_features.csv", output / f"cell_features_{image_stem}.csv")
+    (output / "blue_pixels_features.csv").write_text("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", encoding="utf-8-sig")
+    write_blue_pixels_xlsx(output)
+    shutil.copy2(output / "blue_table.xlsx", output / f"blue_table_{image_stem}.xlsx")
+
+    summary_header = "image_name,image_width,image_height,accepted_object_count,accepted_object_pixels,accepted_blue_pixels,blue_pixel_percent_all_accepted,qc_status\n"
+    summary_row = f"{image.name},{width},{height},0,0,0,0,{failure_status}\n"
+    (output / "final_frame_summary.csv").write_text(summary_header + summary_row, encoding="utf-8-sig")
+    shutil.copy2(output / "final_frame_summary.csv", output / f"frame_features_{image_stem}.csv")
+    report = (
+        "# IronCellQuant single-frame QC report\n\n"
+        f"## Status\n\n{failure_status}\n\n"
+        "## Weka model\n\n"
+        f"Model path: {weka_model}\n\n"
+        f"{detail}\n\n"
+        "No accepted biological ROI/cell-material regions were produced. Final placeholder outputs were written for QC review only.\n"
+    )
+    (output / "extended_qc_report.md").write_text(report, encoding="utf-8")
+    move_internal_outputs(output)
+    copy_hs_err_logs(output)
+
+
+def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, params: dict[str, str], timeout_seconds: int, weka_model: Path | None = None) -> dict[str, str]:
     started = datetime.now()
-    macro_arg, _ = build_macro_arg(image, output, project, params)
+    fiji_input = prepare_fiji_input(image, output)
+    if weka_model is not None and not weka_model.exists():
+        macro_arg, _ = build_macro_arg(fiji_input, image, output, project, {**params, "weka_model": str(weka_model)})
+        write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, {**params, "weka_model": str(weka_model)})
+        write_weka_failure_outputs(output, image, image.stem, weka_model, params, "FAIL_WEKA_MODEL_MISSING", f"Expected Weka model path does not exist: {weka_model}")
+        finished = datetime.now()
+        return {
+            "project": str(project),
+            "image": str(image),
+            "fiji_input": str(fiji_input),
+            "weka_model": str(weka_model),
+            "weka_tile_size": params.get("weka_tile_size", ""),
+            "weka_tile_overlap": params.get("weka_tile_overlap", ""),
+            "output": str(output),
+            "returncode": "0",
+            "started": started.isoformat(timespec="seconds"),
+            "finished": finished.isoformat(timespec="seconds"),
+            "missing_outputs": "",
+            "stale_outputs": "",
+            "empty_outputs": "",
+            "last_checkpoint": "",
+            "timed_out": "False",
+            "postprocess_error": "FAIL_WEKA_MODEL_MISSING",
+            "ok": "False",
+        }
+    macro_params = params if weka_model is None else {**params, "weka_model": str(weka_model)}
+    macro_arg, _ = build_macro_arg(fiji_input, image, output, project, macro_params)
     cmd = [str(fiji), "--headless", "-macro", str(macro), macro_arg]
-    write_run_parameters(output, project, image, fiji, macro, macro_arg, params)
+    write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, macro_params)
 
     timed_out = False
+    returncode = 1
+    stdout = ""
+    stderr = ""
+    postprocess_error = ""
     process = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
@@ -424,18 +871,40 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     (output / "fiji_stdout.txt").write_text(stdout or "", encoding="utf-8", errors="replace")
     (output / "fiji_stderr.txt").write_text(stderr or "", encoding="utf-8", errors="replace")
     (output / "runner_command.txt").write_text(" ".join(cmd), encoding="utf-8", errors="replace")
-    append_runner_parameters_to_macro_log(output, params)
+    append_runner_parameters_to_macro_log(output, macro_params)
 
-    if returncode == 0:
-        postprocess_outputs(output, image.name)
+    if weka_model is not None and returncode != 0:
+        status = "FAIL_WEKA_INFERENCE_MEMORY" if ("memory" in (stdout + stderr).lower() or "paging file" in (stdout + stderr).lower()) else "FAIL_WEKA_INFERENCE_CRASH"
+        detail = f"Weka inference failed before required outputs were complete. returncode={returncode}; last_checkpoint={read_last_checkpoint(output)}; tile_size={macro_params.get('weka_tile_size')}; tile_overlap={macro_params.get('weka_tile_overlap')}"
+        write_weka_failure_outputs(output, image, image.stem, weka_model, macro_params, status, detail)
+        postprocess_error = status
+        missing, stale, empty = validate_named_outputs(output, final_expected_outputs(params, image.stem), started)
+    else:
+        missing, stale, empty = validate_expected_outputs(output, params, started)
 
-    missing, stale, empty = validate_expected_outputs(output, params, started, image.name)
+    if weka_model is not None and returncode == 0 and (missing or empty):
+        status = "FAIL_WEKA_MASK_MISSING" if "WekaCellMaskRaw" in (stdout + stderr) or "FAIL_WEKA_MASK_MISSING" in (stdout + stderr) else "FAIL_WEKA_TILE_INFERENCE"
+        detail = f"Weka tile inference ended without the required macro outputs. last_checkpoint={read_last_checkpoint(output)}; missing_outputs={';'.join(missing)}; empty_outputs={';'.join(empty)}; tile_size={macro_params.get('weka_tile_size')}; tile_overlap={macro_params.get('weka_tile_overlap')}"
+        write_weka_failure_outputs(output, image, image.stem, weka_model, macro_params, status, detail)
+        postprocess_error = status
+        missing, stale, empty = validate_named_outputs(output, final_expected_outputs(params, image.stem), started)
+
+    if returncode == 0 and not missing and not stale and not empty and not postprocess_error:
+        try:
+            postprocess_outputs(output, image.stem, image, params)
+        except Exception as exc:
+            postprocess_error = repr(exc)
+        missing, stale, empty = validate_named_outputs(output, final_expected_outputs(params, image.stem), started)
 
     last_checkpoint = read_last_checkpoint(output)
-    ok = returncode == 0 and not missing and not stale and not empty
+    ok = returncode == 0 and not missing and not stale and not empty and not postprocess_error
     return {
         "project": str(project),
         "image": str(image),
+        "fiji_input": str(fiji_input),
+        "weka_model": "" if weka_model is None else str(weka_model),
+        "weka_tile_size": macro_params.get("weka_tile_size", ""),
+        "weka_tile_overlap": macro_params.get("weka_tile_overlap", ""),
         "output": str(output),
         "returncode": str(returncode),
         "started": started.isoformat(timespec="seconds"),
@@ -445,6 +914,7 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
         "empty_outputs": ";".join(empty),
         "last_checkpoint": last_checkpoint,
         "timed_out": str(timed_out),
+        "postprocess_error": postprocess_error,
         "ok": str(ok),
     }
 
@@ -468,6 +938,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefix", default="single_test")
     parser.add_argument("--macro", type=Path, help="Macro path. Defaults to project/macros/Main_IronCells_headless.ijm.")
     parser.add_argument("--fiji", type=Path, help="Path to fiji.bat. Can also be set by FIJI_PATH.")
+    parser.add_argument("--weka-model", type=Path, help="Optional Fiji Trainable Weka Segmentation .model path for cell-material detection.")
     parser.add_argument("--timeout-seconds", type=int, default=180)
     add_param_args(parser)
     return parser.parse_args()
@@ -491,7 +962,7 @@ def main() -> int:
         raise SystemExit(f"Fiji runner not found: {fiji}")
 
     output = create_clean_output((args.output or output_root).resolve(), args.prefix, args.clean_output and args.output is not None)
-    row = run_fiji(project, image, output, fiji, macro, params_from_args(args), args.timeout_seconds)
+    row = run_fiji(project, image, output, fiji, macro, params_from_args(args), args.timeout_seconds, args.weka_model.resolve() if args.weka_model else None)
 
     with (output / "runner_report.csv").open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(row))
