@@ -491,6 +491,27 @@ File.append(originalFileName + "," + groupName + ",all_accepted_cell_material,fr
 File.append(originalFileName + "," + groupName + ",all_cleaned_cell_material,frame," + d2s(whiteAfterMorphology,0) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "\n", blueCsv);
 
 if (saveOverlays == 1) {
+    checkpoint("before_save_stage1_masks");
+    selectWindow(cellMaskTitle);
+    saveAs("Tiff", outputDir + "/cellmask.tif");
+    selectWindow("Original_RGB");
+    run("Duplicate...", "title=Cell_Pixels_Visualization");
+    selectWindow(cellMaskTitle);
+    run("Create Selection");
+    if (selectionType() != -1) {
+        selectWindow("Cell_Pixels_Visualization");
+        run("Restore Selection");
+        setForegroundColor(255,0,255);
+        run("Fill", "slice");
+        run("Select None");
+    }
+    saveAs("Png", outputDir + "/vis_cellpixels.png");
+    selectWindow("Blue_Pixels_Mask");
+    saveAs("Tiff", outputDir + "/blue_inside_cells.tif");
+    checkpoint("after_save_stage1_masks");
+}
+
+if (saveOverlays == 1) {
     checkpoint("before_final_overlay_blue_layer");
     requireWindow("BlueInsideCells");
     requireWindow("Accepted_Objects_Mask");
