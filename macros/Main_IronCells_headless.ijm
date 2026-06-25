@@ -474,21 +474,39 @@ for (i = 0; i < nObjects; i++) {
 for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
     for (i = 0; i < nObjects; i++) {
         if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget && blueFractionForSelection[i] < 0.99) {
-            addSelectedObject(i);
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
         }
     }
 }
 for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
     for (i = 0; i < nObjects; i++) {
         if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && selectedCount < frameSelectTopBlue && selectedNearFullBlueCount < frameSelectMaxNearFullBlue && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget && blueFractionForSelection[i] >= 0.99) {
-            addSelectedObject(i);
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
         }
     }
 }
 for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
     for (i = 0; i < nObjects; i++) {
         if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && selectedCount < frameSelectTopBlue && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget) {
-            addSelectedObject(i);
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
         }
     }
 }
@@ -696,15 +714,6 @@ function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
     run("Select None");
 }
 
-function addSelectedObject(index) {
-    selectedFlags[index] = 1;
-    selectedCount++;
-    selectedObjectPixels += objectPixelsForSelection[index];
-    selectedBluePixels += bluePixelsForSelection[index];
-    if (blueFractionForSelection[index] >= 0.99) selectedNearFullBlueCount++;
-    if (selectedObjectIds != "") selectedObjectIds += "|";
-    selectedObjectIds += "" + (index + 1);
-}
 
 function drawSelectedObjectOverlay(id, bx, by, bw, bh) {
     requireWindow("SelectedObjectsOverlay");
