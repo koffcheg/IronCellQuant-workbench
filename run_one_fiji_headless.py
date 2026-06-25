@@ -99,6 +99,7 @@ DEFAULT_PARAMS = {
     "weka_tile_overlap": "64",
     "frame_select_top_size": "40",
     "frame_select_top_blue": "20",
+    "frame_select_max_near_full_blue": "5",
 }
 
 

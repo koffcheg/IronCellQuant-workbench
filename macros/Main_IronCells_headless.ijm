@@ -56,6 +56,7 @@ maxStableAcceptedObjects = parseFloat(getArgString(arg, "max_stable_accepted_obj
 minStableAcceptedPixels = parseFloat(getArgString(arg, "min_stable_accepted_pixels", "500"));
 frameSelectTopSize = parseFloat(getArgString(arg, "frame_select_top_size", "40"));
 frameSelectTopBlue = parseFloat(getArgString(arg, "frame_select_top_blue", "20"));
+frameSelectMaxNearFullBlue = parseFloat(getArgString(arg, "frame_select_max_near_full_blue", "5"));
 
 File.makeDirectory(outputDir);
 logPath = outputDir + "/macro_log.txt";
@@ -405,11 +406,11 @@ for (i = 0; i < nObjects; i++) {
             warnFullBlueCandidate = 1;
             selectionReviewNote = "warn_nearly_full_blue_candidate";
             if (fullBluePlausible == 0) {
-                selectionPenaltyFullBlue = 1000;
-                selectionReviewNote = "penalized_nearly_full_blue_artifact_risk";
+                selectionPenaltyFullBlue = 10000;
+                selectionReviewNote = "strongly_deprioritized_nearly_full_blue_artifact_risk";
             } else {
-                selectionPenaltyFullBlue = 5;
-                selectionReviewNote = "near_full_blue_but_size_shape_context_plausible";
+                selectionPenaltyFullBlue = 250;
+                selectionReviewNote = "deprioritized_nearly_full_blue_size_shape_plausible";
             }
         }
         fullBluePenaltyForSelection[i] = selectionPenaltyFullBlue;
@@ -441,7 +442,7 @@ for (i = 0; i < nObjects; i++) {
     }
 }
 
-selectedCount = 0; selectedObjectPixels = 0; selectedBluePixels = 0; selectedObjectIds = "";
+selectedCount = 0; selectedNearFullBlueCount = 0; selectedObjectPixels = 0; selectedBluePixels = 0; selectedObjectIds = "";
 for (i = 0; i < nObjects; i++) {
     if (acceptedFlags[i] == 1) {
         rankSize = 1;
@@ -468,13 +469,26 @@ for (i = 0; i < nObjects; i++) {
         }
         blueRankForSelection[i] = rankBlue;
         selectionScoreForSelection[i] = sizeRankForSelection[i] * 10000 + rankBlue + fullBluePenaltyForSelection[i];
-        if (sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] <= frameSelectTopBlue) {
-            selectedFlags[i] = 1;
-            selectedCount++;
-            selectedObjectPixels += objectPixelsForSelection[i];
-            selectedBluePixels += bluePixelsForSelection[i];
-            if (selectedObjectIds != "") selectedObjectIds += "|";
-            selectedObjectIds += "" + (i + 1);
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget && blueFractionForSelection[i] < 0.99) {
+            addSelectedObject(i);
+        }
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && selectedCount < frameSelectTopBlue && selectedNearFullBlueCount < frameSelectMaxNearFullBlue && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget && blueFractionForSelection[i] >= 0.99) {
+            addSelectedObject(i);
+        }
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && selectedCount < frameSelectTopBlue && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget) {
+            addSelectedObject(i);
         }
     }
 }
@@ -595,7 +609,7 @@ if (roiWarningCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_ROI_RECONSTRU
 if (lowAcceptedAreaWarning == 1) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_AREA");
 if (acceptedCount > maxStableAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_HIGH_ACCEPTED_OBJECT_COUNT");
 if (acceptedCount > 0) { if (blueFullCount / acceptedCount > 0.25) qcStatus = appendQcStatus(qcStatus, "WARN_MANY_FULL_BLUE_OBJECTS"); }
-if (selectedCount > 0) { if (selectedFraction > 0.95) qcStatus = appendQcStatus(qcStatus, "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE"); }
+if (selectedNearFullBlueCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE");
 if (borderCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_BORDER_ARTIFACTS_REMOVED");
 if (nObjects > 0) { if ((tooSmallCount + tooLongCount) / nObjects > 0.50) qcStatus = appendQcStatus(qcStatus, "WARN_MANY_REJECTED_ARTIFACTS"); }
 
@@ -680,6 +694,16 @@ function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
         drawString("#" + id, rectX, maxOf(20, rectY-6));
     }
     run("Select None");
+}
+
+function addSelectedObject(index) {
+    selectedFlags[index] = 1;
+    selectedCount++;
+    selectedObjectPixels += objectPixelsForSelection[index];
+    selectedBluePixels += bluePixelsForSelection[index];
+    if (blueFractionForSelection[index] >= 0.99) selectedNearFullBlueCount++;
+    if (selectedObjectIds != "") selectedObjectIds += "|";
+    selectedObjectIds += "" + (index + 1);
 }
 
 function drawSelectedObjectOverlay(id, bx, by, bw, bh) {
@@ -887,7 +911,7 @@ function writeQcReport(qcStatus) {
         if (acceptedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_ACCEPTED_OBJECT_COUNT: fewer accepted objects than the minimum expected count.\n";
         if (selectedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_SELECTED_FRAME_OBJECT_COUNT: fewer selected frame-summary objects than the minimum expected count.\n";
         if (roiWarningCount > 0) report += "- WARN_ROI_RECONSTRUCTION: one or more objects had ROI reconstruction warnings and were excluded from final accepted summary.\n";
-        if (selectedCount > 0) { if (selectedFraction > 0.95) report += "- WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE: selected frame-summary objects remain near full-blue after deterministic penalty ranking; review selected overlays/contact sheets before biological interpretation.\n"; }
+        if (selectedNearFullBlueCount > 0) report += "- WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE: selected frame-summary objects still include near-full-blue candidates; review selected overlays/contact sheets before biological interpretation.\n";
         if (lowAcceptedAreaWarning == 1) report += "- WARN_LOW_ACCEPTED_AREA: accepted object count or accepted object pixels are low; frame-level blue percent can be unstable and should be interpreted cautiously.\n";
         report += "\n";
     }
