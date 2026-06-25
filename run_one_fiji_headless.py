@@ -849,7 +849,7 @@ def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame
         classification = str(row.get("classification", "")).strip().lower()
         reject_reason = str(row.get("reject_reason", "")).strip().lower()
         area = as_float(row.get("area_px"))
-        if classification == "aggregate_candidate" and reject_reason == "reject_large_rectangular_artifact" and area >= 100000:
+        if reject_reason == "reject_large_rectangular_artifact" and area >= 100000 and classification != "border_object":
             seed = dict(row)
             seed["object_pixels"] = str(round(area))
             seed["blue_pixels"] = "0"
@@ -904,7 +904,11 @@ def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame
         x2 = max(boxes[index][2] for index in members)
         y2 = max(boxes[index][3] for index in members)
         large_seed_count = 0
+        seed_object_ids: list[str] = []
+        seed_reasons: list[str] = []
         for index in members:
+            seed_object_ids.append(str(seeds[index].get("object_id", "")))
+            seed_reasons.append(str(seeds[index].get("roi_seed_reason", "roi_seed_clustered_cell_material") or "roi_seed_clustered_cell_material"))
             if str(seeds[index].get("roi_seed_reason", "")) == "roi_seed_large_aggregate_candidate":
                 large_seed_count += 1
         near_full = total_pixels > 0 and (100 * total_blue / total_pixels) >= 99
@@ -927,6 +931,8 @@ def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame
             "roi_blue_pixel_percent": 100 * total_blue / total_pixels if total_pixels > 0 else 0,
             "roi_selection_score": score,
             "roi_warn_near_full_blue_dominated": "true" if near_full else "false",
+            "roi_seed_object_ids": "|".join(seed_object_ids),
+            "roi_seed_reasons": "|".join(seed_reasons),
             "roi_review_note": note,
         })
     proposals = [proposal for proposal in proposals if proposal.get("roi_review_note") != "roi_reject_diffuse_full_blue_region"]
@@ -952,6 +958,8 @@ def write_roi_proposals_csv(output: Path, image_stem: str, proposals: list[dict[
         "roi_blue_pixel_percent",
         "roi_selection_score",
         "roi_warn_near_full_blue_dominated",
+        "roi_seed_object_ids",
+        "roi_seed_reasons",
         "roi_review_note",
     ]
     with (output / f"roi_proposals_{image_stem}.csv").open("w", encoding="utf-8-sig", newline="") as f:
