@@ -35,6 +35,7 @@ OVERLAY_EXPECTED_OUTPUTS = [
     "cellmask.tif",
     "vis_cellpixels.png",
     "roi_overlay.jpg",
+    "selected_objects_overlay.jpg",
     "blue_inside_cells.tif",
 ]
 
@@ -53,6 +54,7 @@ FINAL_OUTPUT_MAP = {
     "cellmask.tif": "cellmask_{image_stem}.tif",
     "vis_cellpixels.png": "vis_cellpixels_{image_stem}.png",
     "roi_overlay.jpg": "roi_overlay_{image_stem}.jpg",
+    "selected_objects_overlay.jpg": "selected_objects_overlay_{image_stem}.jpg",
     "blue_inside_cells.tif": "blue_inside_cells_{image_stem}.tif",
     "blue_table.xlsx": "blue_table_{image_stem}.xlsx",
     "cell_features.csv": "cell_features_{image_stem}.csv",
@@ -598,6 +600,7 @@ def validate_output_image_dimensions(output: Path, image_stem: str, original_ima
         f"blue_inside_cells_{image_stem}.tif",
         f"vis_cellpixels_{image_stem}.png",
         f"roi_overlay_{image_stem}.jpg",
+        f"selected_objects_overlay_{image_stem}.jpg",
     ]
     for name in final_names:
         actual = read_image_dimensions(output / name)
@@ -736,6 +739,7 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     write_simple_tiff(output / f"blue_inside_cells_{image_stem}.tif", width, height, 0)
     write_simple_png(output / f"vis_cellpixels_{image_stem}.png", width, height, (80, 0, 80))
     write_simple_png(output / f"roi_overlay_{image_stem}.jpg", width, height, (80, 0, 0))
+    write_simple_png(output / f"selected_objects_overlay_{image_stem}.jpg", width, height, (0, 80, 80))
 
     cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
     (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")

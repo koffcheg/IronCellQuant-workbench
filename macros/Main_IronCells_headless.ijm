@@ -297,6 +297,8 @@ if (saveOverlays == 1) {
     run("Duplicate...", "title=RoiOverlay");
     selectWindow("Original_RGB");
     run("Duplicate...", "title=ReviewDetectionOverlay");
+    selectWindow("Original_RGB");
+    run("Duplicate...", "title=SelectedObjectsOverlay");
     newImage("Accepted_Objects_Mask", "8-bit black", width, height, 1);
     checkpoint("after_overlay_setup");
 }
@@ -456,6 +458,11 @@ for (i = 0; i < nObjects; i++) {
         }
     }
 }
+if (saveOverlays == 1) {
+    for (i = 0; i < nObjects; i++) {
+        if (selectedFlags[i] == 1) drawSelectedObjectOverlay(i + 1, bxs[i], bys[i], bws[i], bhs[i]);
+    }
+}
 for (i = 0; i < nObjects; i++) {
     if (acceptedFlags[i] == 1) {
         File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + frameId + "," + (i+1) + "," + frameId + "_object_" + (i+1) + ",weka_candidate,accepted_cell_candidate," + boolText(selectedFlags[i]) + ",," + d2s(sizeRankForSelection[i],0) + "," + d2s(blueRankForSelection[i],0) + "," + objectBaseLines[i] + "\n", objectCsv);
@@ -541,6 +548,12 @@ if (saveOverlays == 1) {
     run("Select None");
     saveAs("Jpeg", outputDir + "/roi_overlay.jpg");
     checkpoint("after_save_roi_overlay");
+
+    checkpoint("before_save_selected_objects_overlay");
+    requireWindow("SelectedObjectsOverlay");
+    run("Select None");
+    saveAs("Jpeg", outputDir + "/selected_objects_overlay.jpg");
+    checkpoint("after_save_selected_objects_overlay");
 }
 
 lowAcceptedAreaWarning = 0;
@@ -638,6 +651,26 @@ function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
         setFont("SansSerif", 18, "bold");
         setColor(255,255,0);
         drawString("#" + id, rectX, maxOf(20, rectY-6));
+    }
+    run("Select None");
+}
+
+function drawSelectedObjectOverlay(id, bx, by, bw, bh) {
+    requireWindow("SelectedObjectsOverlay");
+    rectX = clampFloor(bx, 0, width - 1);
+    rectY = clampFloor(by, 0, height - 1);
+    rectW = maxOf(1, round(bw));
+    rectH = maxOf(1, round(bh));
+    if (rectX + rectW > width) rectW = width - rectX;
+    if (rectY + rectH > height) rectH = height - rectY;
+    makeRectangle(rectX, rectY, rectW, rectH);
+    setLineWidth(contourWidth + 1);
+    setForegroundColor(0,255,255);
+    run("Draw", "slice");
+    if (labelObjects == 1) {
+        setFont("SansSerif", 20, "bold");
+        setColor(0,255,255);
+        drawString("#" + id, rectX, maxOf(24, rectY-8));
     }
     run("Select None");
 }
