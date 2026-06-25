@@ -54,6 +54,8 @@ minExpectedAcceptedObjects = parseFloat(getArgString(arg, "min_expected_accepted
 minStableAcceptedObjects = parseFloat(getArgString(arg, "min_stable_accepted_objects", "3"));
 maxStableAcceptedObjects = parseFloat(getArgString(arg, "max_stable_accepted_objects", "40"));
 minStableAcceptedPixels = parseFloat(getArgString(arg, "min_stable_accepted_pixels", "500"));
+frameSelectTopSize = parseFloat(getArgString(arg, "frame_select_top_size", "40"));
+frameSelectTopBlue = parseFloat(getArgString(arg, "frame_select_top_blue", "20"));
 
 File.makeDirectory(outputDir);
 logPath = outputDir + "/macro_log.txt";
@@ -279,12 +281,15 @@ frameId = sanitizeId(originalFileName);
 allCsv = outputDir + "/all_components_before_filter.csv";
 File.saveString("component_id,area_px,centroid_x,centroid_y,bbox_x,bbox_y,bbox_width,bbox_height,aspect_ratio,touches_border,classification,accepted_for_summary,reject_reason\n", allCsv);
 rejectedCsv = outputDir + "/rejected_objects.csv";
-File.saveString("image_name,group_name,frame_id,object_id,feature_row_id,classification,reject_reason,area_px,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,touches_border,roi_reconstruction_status\n", rejectedCsv);
+File.saveString("image_name,group_name,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,classification,reject_reason,area_px,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,touches_border,roi_reconstruction_status\n", rejectedCsv);
 objectCsv = outputDir + "/cell_features.csv";
-cellFeatureHeader = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n";
+cellFeatureHeader = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n";
 File.saveString(cellFeatureHeader, objectCsv);
 blueCsv = outputDir + "/blue_pixels_features.csv";
 File.saveString("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", blueCsv);
+acceptedFlags = newArray(nObjects); selectedFlags = newArray(nObjects);
+objectPixelsForSelection = newArray(nObjects); bluePixelsForSelection = newArray(nObjects); blueFractionForSelection = newArray(nObjects);
+sizeRankForSelection = newArray(nObjects); blueRankForSelection = newArray(nObjects); objectBaseLines = newArray(nObjects);
 
 if (saveOverlays == 1) {
     checkpoint("before_overlay_setup");
@@ -388,8 +393,11 @@ for (i = 0; i < nObjects; i++) {
         acceptedGraySum += grayMean * objectPixels;
         acceptedGraySqSum += (grayStd * grayStd + grayMean * grayMean) * objectPixels;
         objectType = outputObjectType(classification);
-        objectLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + frameId + "," + objectId + "," + featureRowId + "," + objectType + "," + d2s(roiAreaPixels,0) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(stdR,3) + "," + d2s(stdG,3) + "," + d2s(stdB,3) + "," + d2s(minR,0) + "," + d2s(minG,0) + "," + d2s(minB,0) + "," + d2s(maxR,0) + "," + d2s(maxG,0) + "," + d2s(maxB,0) + "," + d2s(rOverG,6) + "," + d2s(bOverR,6) + "," + d2s(bOverRgbSum,6) + "," + d2s(grayMean,3) + "," + d2s(grayStd,3) + "," + d2s(grayMin,0) + "," + d2s(grayMax,0) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus + "\n";
-        File.append(objectLine, objectCsv);
+        acceptedFlags[i] = 1;
+        objectPixelsForSelection[i] = objectPixels;
+        bluePixelsForSelection[i] = bluePixels;
+        blueFractionForSelection[i] = fraction;
+        objectBaseLines[i] = objectType + "," + d2s(roiAreaPixels,0) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(stdR,3) + "," + d2s(stdG,3) + "," + d2s(stdB,3) + "," + d2s(minR,0) + "," + d2s(minG,0) + "," + d2s(minB,0) + "," + d2s(maxR,0) + "," + d2s(maxG,0) + "," + d2s(maxB,0) + "," + d2s(rOverG,6) + "," + d2s(bOverR,6) + "," + d2s(bOverRgbSum,6) + "," + d2s(grayMean,3) + "," + d2s(grayStd,3) + "," + d2s(grayMin,0) + "," + d2s(grayMax,0) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus;
         File.append(originalFileName + "," + groupName + "," + objectType + "," + (i+1) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "\n", blueCsv);
         if (saveOverlays == 1) {
             if (selectionType() != -1) {
@@ -400,7 +408,7 @@ for (i = 0; i < nObjects; i++) {
             }
         }
     } else {
-        File.append(originalFileName + "," + groupName + "," + frameId + "," + objectId + "," + featureRowId + "," + classification + "," + rejectReason + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + roiStatus + "\n", rejectedCsv);
+        File.append(originalFileName + "," + groupName + "," + frameId + "," + objectId + "," + featureRowId + ",weka_candidate,rejected,false," + classification + "," + rejectReason + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + roiStatus + "\n", rejectedCsv);
     }
 
     if (saveOverlays == 1) {
@@ -412,6 +420,45 @@ for (i = 0; i < nObjects; i++) {
                 if (accepted == 1) drawReviewObjectOverlay(objectId, classification, fraction, bxs[i], bys[i], bws[i], bhs[i]);
             }
         }
+    }
+}
+
+selectedCount = 0; selectedObjectPixels = 0; selectedBluePixels = 0; selectedObjectIds = "";
+for (i = 0; i < nObjects; i++) {
+    if (acceptedFlags[i] == 1) {
+        rankSize = 1;
+        for (j = 0; j < nObjects; j++) {
+            if (acceptedFlags[j] == 1) {
+                if (objectPixelsForSelection[j] > objectPixelsForSelection[i]) rankSize++;
+                if (objectPixelsForSelection[j] == objectPixelsForSelection[i] && j < i) rankSize++;
+            }
+        }
+        sizeRankForSelection[i] = rankSize;
+    }
+}
+for (i = 0; i < nObjects; i++) {
+    if (acceptedFlags[i] == 1) {
+        rankBlue = 1;
+        for (j = 0; j < nObjects; j++) {
+            if (acceptedFlags[j] == 1 && sizeRankForSelection[j] <= frameSelectTopSize) {
+                if (blueFractionForSelection[j] > blueFractionForSelection[i]) rankBlue++;
+                if (blueFractionForSelection[j] == blueFractionForSelection[i] && j < i) rankBlue++;
+            }
+        }
+        blueRankForSelection[i] = rankBlue;
+        if (sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] <= frameSelectTopBlue) {
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
+        }
+    }
+}
+for (i = 0; i < nObjects; i++) {
+    if (acceptedFlags[i] == 1) {
+        File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + frameId + "," + (i+1) + "," + frameId + "_object_" + (i+1) + ",weka_candidate,accepted_cell_candidate," + boolText(selectedFlags[i]) + ",," + d2s(sizeRankForSelection[i],0) + "," + d2s(blueRankForSelection[i],0) + "," + objectBaseLines[i] + "\n", objectCsv);
     }
 }
 checkpoint("after_per_object_loop");
@@ -432,6 +479,7 @@ if (totalAcceptedObjectPixels > 0) {
 }
 acceptedAreaFractionOfFrame = totalAcceptedObjectPixels / framePixels;
 acceptedAreaPercentOfFrame = 100 * acceptedAreaFractionOfFrame;
+if (selectedObjectPixels > 0) selectedFraction = selectedBluePixels / selectedObjectPixels; else selectedFraction = 0;
 File.append(originalFileName + "," + groupName + ",all_accepted_cell_material,frame," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "\n", blueCsv);
 File.append(originalFileName + "," + groupName + ",all_cleaned_cell_material,frame," + d2s(whiteAfterMorphology,0) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "\n", blueCsv);
 
@@ -503,6 +551,7 @@ qcStatus = "PASS";
 if (wekaFailureStatus != "") qcStatus = appendQcStatus(qcStatus, wekaFailureStatus);
 if (acceptedCount == 0) qcStatus = appendQcStatus(qcStatus, "FAIL_NO_ACCEPTED_OBJECTS");
 if (acceptedCount < minExpectedAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_OBJECT_COUNT");
+if (selectedCount < minExpectedAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_SELECTED_FRAME_OBJECT_COUNT");
 if (roiWarningCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_ROI_RECONSTRUCTION");
 if (lowAcceptedAreaWarning == 1) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_AREA");
 if (acceptedCount > maxStableAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_HIGH_ACCEPTED_OBJECT_COUNT");
@@ -511,15 +560,16 @@ if (borderCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_BORDER_ARTIFACTS_
 if (nObjects > 0) { if ((tooSmallCount + tooLongCount) / nObjects > 0.50) qcStatus = appendQcStatus(qcStatus, "WARN_MANY_REJECTED_ARTIFACTS"); }
 
 summaryCsv = outputDir + "/final_frame_summary.csv";
-summaryHeader = "image_name,group_name,original_long_path,short_path_used,image_width,image_height,threshold_method,threshold_mode,background_rolling,median_radius,contrast_saturated,morph_open_iterations,morph_close_iterations,fill_holes,metadata_bar_height,frame_area_pixels,accepted_area_fraction_of_frame,accepted_area_percent_of_frame,particle_extract_min_area,particle_extract_max_area,min_noise_area,min_single_cell_area,max_single_cell_area,min_aggregate_area,max_aggregate_area,max_single_cell_aspect,max_aggregate_aspect,exclude_border_objects,border_margin_px,blue_min,blue_over_red,blue_over_green,min_stable_accepted_objects,min_stable_accepted_pixels,total_cell_material_pixels,cell_material_area_fraction,total_blue_pixels_in_cell_material,blue_pixel_fraction_all_cell_material,blue_pixel_percent_all_cell_material,component_count_total,accepted_object_count,single_cell_candidate_count,aggregate_candidate_count,too_small_noise_count,small_cell_or_fragment_count,too_large_artifact_count,too_long_artifact_count,border_object_count,roi_reconstruction_warning_count,accepted_R_mean,accepted_G_mean,accepted_B_mean,accepted_R_std,accepted_G_std,accepted_B_std,accepted_B_over_R_mean,accepted_B_over_RGB_sum_mean,accepted_gray_stddev,accepted_object_pixels,accepted_blue_pixels,blue_pixel_fraction_all_accepted,blue_pixel_percent_all_accepted,components_area_ge_1,components_area_ge_5,components_area_ge_10,components_area_ge_20,components_area_ge_50,components_area_ge_100,components_area_ge_200,components_area_ge_500,qc_status\n";
+summaryHeader = "image_name,group_name,original_long_path,short_path_used,image_width,image_height,threshold_method,threshold_mode,background_rolling,median_radius,contrast_saturated,morph_open_iterations,morph_close_iterations,fill_holes,metadata_bar_height,frame_area_pixels,accepted_area_fraction_of_frame,accepted_area_percent_of_frame,particle_extract_min_area,particle_extract_max_area,min_noise_area,min_single_cell_area,max_single_cell_area,min_aggregate_area,max_aggregate_area,max_single_cell_aspect,max_aggregate_aspect,exclude_border_objects,border_margin_px,blue_min,blue_over_red,blue_over_green,min_stable_accepted_objects,min_stable_accepted_pixels,total_cell_material_pixels,cell_material_area_fraction,total_blue_pixels_in_cell_material,blue_pixel_fraction_all_cell_material,blue_pixel_percent_all_cell_material,selected_frame_object_count,selected_frame_object_ids,selected_object_pixels,selected_blue_pixels,selected_blue_pixel_percent,component_count_total,accepted_object_count,single_cell_candidate_count,aggregate_candidate_count,too_small_noise_count,small_cell_or_fragment_count,too_large_artifact_count,too_long_artifact_count,border_object_count,roi_reconstruction_warning_count,accepted_R_mean,accepted_G_mean,accepted_B_mean,accepted_R_std,accepted_G_std,accepted_B_std,accepted_B_over_R_mean,accepted_B_over_RGB_sum_mean,accepted_gray_stddev,accepted_object_pixels,accepted_blue_pixels,blue_pixel_fraction_all_accepted,blue_pixel_percent_all_accepted,components_area_ge_1,components_area_ge_5,components_area_ge_10,components_area_ge_20,components_area_ge_50,components_area_ge_100,components_area_ge_200,components_area_ge_500,qc_status\n";
 File.saveString(summaryHeader, summaryCsv);
-summaryLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + width + "," + height + "," + thresholdMethod + "," + thresholdMode + "," + backgroundRolling + "," + medianRadius + "," + contrastSaturated + "," + morphOpenIterations + "," + morphCloseIterations + "," + boolText(fillHoles) + "," + metadataBarHeight + "," + d2s(framePixels,0) + "," + d2s(acceptedAreaFractionOfFrame,8) + "," + d2s(acceptedAreaPercentOfFrame,4) + "," + particleExtractMinArea + "," + particleExtractMaxArea + "," + minNoiseArea + "," + minSingleCellArea + "," + maxSingleCellArea + "," + minAggregateArea + "," + maxAggregateArea + "," + maxSingleCellAspect + "," + maxAggregateAspect + "," + boolText(excludeBorderObjects) + "," + borderMarginPx + "," + blueMin + "," + blueOverRed + "," + blueOverGreen + "," + minStableAcceptedObjects + "," + minStableAcceptedPixels + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(acceptedAreaFractionOfFrame,8) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + nObjects + "," + acceptedCount + "," + singleCount + "," + aggregateCount + "," + tooSmallCount + "," + smallFragmentCount + "," + tooLargeCount + "," + tooLongCount + "," + borderCount + "," + roiWarningCount + "," + d2s(acceptedRMean,3) + "," + d2s(acceptedGMean,3) + "," + d2s(acceptedBMean,3) + "," + d2s(acceptedRStd,3) + "," + d2s(acceptedGStd,3) + "," + d2s(acceptedBStd,3) + "," + d2s(acceptedBOverRMean,6) + "," + d2s(acceptedBOverRGBSumMean,6) + "," + d2s(acceptedGrayStddev,3) + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + componentsGe1 + "," + componentsGe5 + "," + componentsGe10 + "," + componentsGe20 + "," + componentsGe50 + "," + componentsGe100 + "," + componentsGe200 + "," + componentsGe500 + "," + qcStatus + "\n";
+summaryLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + width + "," + height + "," + thresholdMethod + "," + thresholdMode + "," + backgroundRolling + "," + medianRadius + "," + contrastSaturated + "," + morphOpenIterations + "," + morphCloseIterations + "," + boolText(fillHoles) + "," + metadataBarHeight + "," + d2s(framePixels,0) + "," + d2s(acceptedAreaFractionOfFrame,8) + "," + d2s(acceptedAreaPercentOfFrame,4) + "," + particleExtractMinArea + "," + particleExtractMaxArea + "," + minNoiseArea + "," + minSingleCellArea + "," + maxSingleCellArea + "," + minAggregateArea + "," + maxAggregateArea + "," + maxSingleCellAspect + "," + maxAggregateAspect + "," + boolText(excludeBorderObjects) + "," + borderMarginPx + "," + blueMin + "," + blueOverRed + "," + blueOverGreen + "," + minStableAcceptedObjects + "," + minStableAcceptedPixels + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(acceptedAreaFractionOfFrame,8) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + selectedCount + "," + selectedObjectIds + "," + d2s(selectedObjectPixels,0) + "," + d2s(selectedBluePixels,0) + "," + d2s(100*selectedFraction,4) + "," + nObjects + "," + acceptedCount + "," + singleCount + "," + aggregateCount + "," + tooSmallCount + "," + smallFragmentCount + "," + tooLargeCount + "," + tooLongCount + "," + borderCount + "," + roiWarningCount + "," + d2s(acceptedRMean,3) + "," + d2s(acceptedGMean,3) + "," + d2s(acceptedBMean,3) + "," + d2s(acceptedRStd,3) + "," + d2s(acceptedGStd,3) + "," + d2s(acceptedBStd,3) + "," + d2s(acceptedBOverRMean,6) + "," + d2s(acceptedBOverRGBSumMean,6) + "," + d2s(acceptedGrayStddev,3) + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + componentsGe1 + "," + componentsGe5 + "," + componentsGe10 + "," + componentsGe20 + "," + componentsGe50 + "," + componentsGe100 + "," + componentsGe200 + "," + componentsGe500 + "," + qcStatus + "\n";
 File.append(summaryLine, summaryCsv);
 
 writeQcReport(qcStatus);
 checkpoint("after_write_summary_and_qc");
 logLine("component_count_total=" + nObjects);
 logLine("accepted_object_count=" + acceptedCount);
+logLine("selected_frame_object_count=" + selectedCount);
 logLine("roi_reconstruction_warning_count=" + roiWarningCount);
 logLine("blue_pixel_percent_all_accepted=" + d2s(100*acceptedFraction,4));
 logLine("Finished successfully.");
@@ -767,6 +817,7 @@ function writeQcReport(qcStatus) {
             report += "- Stage 1B supervised detector investigation is required before biological interpretation of this frame.\n";
         }
         if (acceptedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_ACCEPTED_OBJECT_COUNT: fewer accepted objects than the minimum expected count.\n";
+        if (selectedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_SELECTED_FRAME_OBJECT_COUNT: fewer selected frame-summary objects than the minimum expected count.\n";
         if (roiWarningCount > 0) report += "- WARN_ROI_RECONSTRUCTION: one or more objects had ROI reconstruction warnings and were excluded from final accepted summary.\n";
         if (lowAcceptedAreaWarning == 1) report += "- WARN_LOW_ACCEPTED_AREA: accepted object count or accepted object pixels are low; frame-level blue percent can be unstable and should be interpreted cautiously.\n";
         report += "\n";
