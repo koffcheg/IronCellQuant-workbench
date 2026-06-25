@@ -7,6 +7,7 @@ import shutil
 import importlib.util
 import zlib
 import subprocess
+import re
 from datetime import datetime
 from typing import Any
 from pathlib import Path
@@ -289,6 +290,98 @@ def write_run_parameters(output: Path, project: Path, original_image: Path, fiji
         for key, value in params.items():
             writer.writerow([key, value])
 
+
+
+def make_frame_id(image_stem: str) -> str:
+    """Return a stable ASCII-safe frame id derived from the original Unicode stem."""
+    ascii_slug = re.sub(r"[^A-Za-z0-9]+", "_", image_stem).strip("_").lower()
+    if not ascii_slug:
+        ascii_slug = "image"
+    ascii_slug = ascii_slug[:80].strip("_") or "image"
+    digest = zlib.crc32(image_stem.encode("utf-8")) & 0xFFFFFFFF
+    return f"frame_{ascii_slug}_{digest:08x}"
+
+
+def contains_replacement_questions(value: str | None) -> bool:
+    return "????" in (value or "")
+
+
+def rewrite_csv_rows(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def normalize_public_csv_metadata(path: Path, original_image: Path, frame_id: str, short_path_used: str, require_object_ids: bool) -> None:
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+
+    for column in ["image_name", "original_long_path", "short_path_used", "frame_id"]:
+        if column not in fieldnames:
+            fieldnames.append(column)
+
+    for row in rows:
+        row["image_name"] = original_image.name
+        row["original_long_path"] = str(original_image)
+        row["short_path_used"] = short_path_used
+        row["frame_id"] = frame_id
+        if require_object_ids and "feature_row_id" in fieldnames:
+            object_id = str(row.get("object_id") or "").strip()
+            if object_id and object_id.lower() != "frame":
+                row["feature_row_id"] = f"{frame_id}_object_{object_id}"
+
+    rewrite_csv_rows(path, rows, fieldnames)
+
+
+def normalize_public_xlsx_metadata(path: Path, original_image: Path, frame_id: str, short_path_used: str) -> None:
+    if importlib.util.find_spec("openpyxl") is None or not path.exists():
+        return
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path)
+    changed = False
+    replacements = {
+        "image_name": original_image.name,
+        "original_long_path": str(original_image),
+        "short_path_used": short_path_used,
+        "frame_id": frame_id,
+    }
+    for worksheet in workbook.worksheets:
+        headers = [cell.value for cell in worksheet[1]]
+        for column_name, value in replacements.items():
+            if column_name in headers:
+                column_index = headers.index(column_name) + 1
+                for row_index in range(2, worksheet.max_row + 1):
+                    worksheet.cell(row=row_index, column=column_index).value = value
+                changed = True
+    if changed:
+        workbook.save(path)
+
+
+def validate_public_metadata(path: Path) -> None:
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        for row_number, row in enumerate(csv.DictReader(f), start=2):
+            for column in ("image_name", "original_long_path"):
+                if contains_replacement_questions(row.get(column)):
+                    raise ValueError(f"Final public metadata contains replacement question marks in {path.name}:{row_number}:{column}")
+
+
+def normalize_public_outputs_metadata(output: Path, image_stem: str, original_image: Path, short_path_used: str) -> None:
+    frame_id = make_frame_id(image_stem)
+    public_tables = [
+        (output / f"cell_features_{image_stem}.csv", True),
+        (output / f"frame_features_{image_stem}.csv", False),
+    ]
+    for path, require_object_ids in public_tables:
+        if path.exists():
+            normalize_public_csv_metadata(path, original_image, frame_id, short_path_used, require_object_ids)
+            validate_public_metadata(path)
+
+    blue_table = output / f"blue_table_{image_stem}.xlsx"
+    normalize_public_xlsx_metadata(blue_table, original_image, frame_id, short_path_used)
 
 
 def read_single_csv_row(path: Path) -> dict[str, str]:
@@ -713,9 +806,10 @@ def write_selected_contact_sheet(output: Path, image_stem: str, original_image: 
     sheet.save(output / f"selected_objects_contact_sheet_{image_stem}.jpg", quality=90)
 
 
-def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
+def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str], short_path_used: str) -> None:
     write_blue_pixels_xlsx(output)
     copy_final_named_outputs(output, image_stem)
+    normalize_public_outputs_metadata(output, image_stem, original_image, short_path_used)
     if bool_param(params.get("save_overlays", "true")):
         write_selected_contact_sheet(output, image_stem, original_image)
     move_internal_outputs(output)
@@ -845,7 +939,7 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
             "ok": "False",
         }
     macro_params = params if weka_model is None else {**params, "weka_model": str(weka_model)}
-    macro_arg, _ = build_macro_arg(fiji_input, image, output, project, macro_params)
+    macro_arg, short_path_used = build_macro_arg(fiji_input, image, output, project, macro_params)
     cmd = [str(fiji), "--headless", "-macro", str(macro), macro_arg]
     write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, macro_params)
 
@@ -891,7 +985,7 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
 
     if returncode == 0 and not missing and not stale and not empty and not postprocess_error:
         try:
-            postprocess_outputs(output, image.stem, image, params)
+            postprocess_outputs(output, image.stem, image, params, short_path_used)
         except Exception as exc:
             postprocess_error = repr(exc)
         missing, stale, empty = validate_named_outputs(output, final_expected_outputs(params, image.stem), started)
