@@ -933,6 +933,9 @@ def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame
             "roi_warn_near_full_blue_dominated": "true" if near_full else "false",
             "roi_seed_object_ids": "|".join(seed_object_ids),
             "roi_seed_reasons": "|".join(seed_reasons),
+            "reference_roi_id": "",
+            "overlaps_reference_roi": "false",
+            "reference_roi_overlap_fraction": "0.0000",
             "roi_review_note": note,
         })
     proposals = [proposal for proposal in proposals if proposal.get("roi_review_note") != "roi_reject_diffuse_full_blue_region"]
@@ -960,6 +963,9 @@ def write_roi_proposals_csv(output: Path, image_stem: str, proposals: list[dict[
         "roi_warn_near_full_blue_dominated",
         "roi_seed_object_ids",
         "roi_seed_reasons",
+        "reference_roi_id",
+        "overlaps_reference_roi",
+        "reference_roi_overlap_fraction",
         "roi_review_note",
     ]
     with (output / f"roi_proposals_{image_stem}.csv").open("w", encoding="utf-8-sig", newline="") as f:
@@ -985,7 +991,7 @@ def write_roi_proposals_overlay(output: Path, image_stem: str, original_image: P
     image.save(output / f"roi_proposals_overlay_{image_stem}.jpg", quality=90)
 
 
-def rewrite_frame_summary_selection(output: Path, image_stem: str, selected_rows: list[dict[str, str]], proposals: list[dict[str, Any]]) -> str:
+def rewrite_frame_summary_selection(output: Path, image_stem: str, selected_rows: list[dict[str, str]], proposals: list[dict[str, Any]], primary_roi: dict[str, Any] | None = None) -> str:
     summary_path = output / f"frame_features_{image_stem}.csv"
     if not summary_path.exists():
         return ""
@@ -995,6 +1001,9 @@ def rewrite_frame_summary_selection(output: Path, image_stem: str, selected_rows
         rows = list(reader)
     if not rows:
         return ""
+    for column in ["primary_auto_roi_id", "primary_auto_roi_reason", "auto_roi_overlaps_reference_roi", "selected_reference_roi_overlap_fraction"]:
+        if column not in fieldnames:
+            fieldnames.append(column)
     row = rows[0]
     selected_pixels = sum(as_float(item.get("object_pixels")) for item in selected_rows)
     selected_blue = sum(as_float(item.get("blue_pixels")) for item in selected_rows)
@@ -1009,6 +1018,10 @@ def rewrite_frame_summary_selection(output: Path, image_stem: str, selected_rows
         qc_status = append_qc_status(qc_status, "WARN_NO_AUTO_ROI_PROPOSALS")
     elif any(str(item.get("inside_auto_roi", "")).lower() != "true" for item in selected_rows):
         qc_status = append_qc_status(qc_status, "WARN_SELECTED_OUTSIDE_AUTO_ROI")
+    row["primary_auto_roi_id"] = "" if primary_roi is None else str(primary_roi.get("roi_id", ""))
+    row["primary_auto_roi_reason"] = "" if primary_roi is None else str(primary_roi.get("roi_review_note", ""))
+    row["auto_roi_overlaps_reference_roi"] = "" if primary_roi is None else str(primary_roi.get("overlaps_reference_roi", "false"))
+    row["selected_reference_roi_overlap_fraction"] = ""
     row["qc_status"] = qc_status
     rewrite_csv_rows(summary_path, rows, fieldnames)
     return qc_status
@@ -1060,8 +1073,19 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
         row["selected_for_frame_summary"] = "false"
         accepted_rows.append(row)
 
-    selection_pool = [row for row in accepted_rows if str(row.get("inside_auto_roi", "")).lower() == "true"] if proposals else accepted_rows
-    if not proposals:
+    primary_roi = proposals[0] if proposals else None
+    if primary_roi is not None:
+        primary_roi_id = str(primary_roi.get("roi_id", ""))
+        selection_pool = [row for row in accepted_rows if row.get("auto_roi_id") == primary_roi_id and str(row.get("inside_auto_roi", "")).lower() == "true"]
+        for row in accepted_rows:
+            if row.get("auto_roi_id") != primary_roi_id and str(row.get("inside_auto_roi", "")).lower() == "true":
+                row["auto_roi_selection_note"] = "inside_secondary_auto_roi_not_primary_selection_pool"
+        if not selection_pool:
+            selection_pool = [row for row in accepted_rows if str(row.get("inside_auto_roi", "")).lower() == "true"]
+            for row in selection_pool:
+                row["auto_roi_selection_note"] = "fallback_any_auto_roi_no_primary_candidates"
+    else:
+        selection_pool = accepted_rows
         for row in accepted_rows:
             row["auto_roi_selection_note"] = "fallback_full_frame_no_auto_roi"
     selection_pool.sort(key=lambda row: (as_float(row.get("selection_score"), 999999999), as_float(row.get("selection_rank_blue"), 999999), -as_float(row.get("object_pixels"))))
@@ -1124,7 +1148,7 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
         if proposals and row.get("auto_roi_selection_note") != "fallback_selected_no_alternative_candidates":
             row["auto_roi_selection_note"] = "selected_inside_auto_roi"
     rewrite_csv_rows(features_path, rows, fieldnames)
-    qc_status = rewrite_frame_summary_selection(output, image_stem, selected_rows, proposals)
+    qc_status = rewrite_frame_summary_selection(output, image_stem, selected_rows, proposals, primary_roi)
     if fallback_strong_near_full:
         qc_status = append_qc_status(qc_status, "WARN_FALLBACK_SELECTED_STRONG_NEAR_FULL_BLUE_ARTIFACT_RISK")
         summary_path = output / f"frame_features_{image_stem}.csv"
@@ -1214,6 +1238,8 @@ def append_auto_roi_qc_report(output: Path, proposals: list[dict[str, Any]], qc_
         "\n## Auto ROI proposal review\n\n",
         f"- auto_roi_proposal_count: {len(proposals)}\n",
         f"- selected_objects_constrained_to_auto_roi: {'true' if proposals else 'false'}\n",
+        f"- primary_auto_roi_id: {proposals[0].get('roi_id', '') if proposals else ''}\n",
+        f"- primary_auto_roi_reason: {proposals[0].get('roi_review_note', '') if proposals else ''}\n",
         "- selected overlay/contact sheet are regenerated from the final postprocessed selected_for_frame_summary flags.\n",
     ]
     large_seed_count = sum(1 for proposal in proposals if proposal.get("roi_review_note") == "roi_seed_large_aggregate_candidate")
