@@ -157,6 +157,7 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
                 f"cellmask_{image_stem}.tif",
                 f"vis_cellpixels_{image_stem}.png",
                 f"roi_overlay_{image_stem}.jpg",
+                f"selected_objects_overlay_{image_stem}.jpg",
                 f"blue_inside_cells_{image_stem}.tif",
             ])
     return outputs
@@ -173,6 +174,8 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
             f"cellmask_{image_stem}.tif",
             f"vis_cellpixels_{image_stem}.png",
             f"roi_overlay_{image_stem}.jpg",
+            f"selected_objects_overlay_{image_stem}.jpg",
+            f"selected_objects_contact_sheet_{image_stem}.jpg",
             f"blue_inside_cells_{image_stem}.tif",
         ])
     return outputs
@@ -492,14 +495,12 @@ def read_tiff_mask_stats_with_pillow(path: Path) -> dict[str, int]:
         bits = image.tag_v2.get(258, 8)
         if isinstance(bits, tuple):
             bits = bits[0]
-        unique_values = set()
-        nonzero = 0
-        for value in image.getdata():
-            unique_values.add(int(value))
-            if len(unique_values) > 2:
-                raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
-            if value != 0:
-                nonzero += 1
+        gray = image.convert("L")
+        histogram = gray.histogram()
+        unique_values = sum(1 for count in histogram if count > 0)
+        if unique_values > 2:
+            raise ValueError(f"Mask is not binary/binary-equivalent: {path}")
+        nonzero = sum(histogram[1:])
     return {"width": width, "height": height, "nonzero": nonzero, "samples": samples, "bits": int(bits)}
 
 
@@ -664,9 +665,59 @@ def move_internal_outputs(output: Path) -> None:
             shutil.move(str(source), str(target))
 
 
+def write_selected_contact_sheet(output: Path, image_stem: str, original_image: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    features_path = output / f"cell_features_{image_stem}.csv"
+    if not features_path.exists():
+        features_path = output / "cell_features.csv"
+    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = [row for row in csv.DictReader(f) if str(row.get("selected_for_frame_summary", "")).lower() == "true"]
+
+    thumb_w = 220
+    thumb_h = 160
+    label_h = 72
+    cols = 4
+    rows_count = max(1, (len(rows) + cols - 1) // cols)
+    sheet = Image.new("RGB", (cols * thumb_w, rows_count * (thumb_h + label_h)), "white")
+    draw = ImageDraw.Draw(sheet)
+
+    with Image.open(original_image) as source:
+        source = source.convert("RGB")
+        for idx, row in enumerate(rows):
+            bbox_x = int(float(row.get("bbox_x") or 0))
+            bbox_y = int(float(row.get("bbox_y") or 0))
+            bbox_w = int(float(row.get("bbox_w") or row.get("bbox_width") or 1))
+            bbox_h = int(float(row.get("bbox_h") or row.get("bbox_height") or 1))
+            pad = 12
+            left = max(0, bbox_x - pad)
+            top = max(0, bbox_y - pad)
+            right = min(source.width, bbox_x + bbox_w + pad)
+            bottom = min(source.height, bbox_y + bbox_h + pad)
+            crop = source.crop((left, top, right, bottom))
+            crop.thumbnail((thumb_w, thumb_h))
+            col = idx % cols
+            row_index = idx // cols
+            x0 = col * thumb_w
+            y0 = row_index * (thumb_h + label_h)
+            sheet.paste(crop, (x0 + (thumb_w - crop.width) // 2, y0))
+            label = (
+                f"#{row.get('object_id')} {row.get('feature_row_id')}\n"
+                f"px={row.get('object_pixels')} blue%={row.get('blue_pixel_percent')}\n"
+                f"bbox=({bbox_x},{bbox_y},{bbox_w},{bbox_h})"
+            )
+            draw.multiline_text((x0 + 4, y0 + thumb_h + 4), label, fill=(0, 0, 0), spacing=2)
+
+    if not rows:
+        draw.text((10, 10), "No selected frame-summary objects", fill=(0, 0, 0))
+    sheet.save(output / f"selected_objects_contact_sheet_{image_stem}.jpg", quality=90)
+
+
 def postprocess_outputs(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> None:
     write_blue_pixels_xlsx(output)
     copy_final_named_outputs(output, image_stem)
+    if bool_param(params.get("save_overlays", "true")):
+        write_selected_contact_sheet(output, image_stem, original_image)
     move_internal_outputs(output)
     validate_frame_summary(output)
     validate_cell_feature_table(output)
@@ -740,6 +791,7 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     write_simple_png(output / f"vis_cellpixels_{image_stem}.png", width, height, (80, 0, 80))
     write_simple_png(output / f"roi_overlay_{image_stem}.jpg", width, height, (80, 0, 0))
     write_simple_png(output / f"selected_objects_overlay_{image_stem}.jpg", width, height, (0, 80, 80))
+    write_simple_png(output / f"selected_objects_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
 
     cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
     (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
