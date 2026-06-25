@@ -817,9 +817,9 @@ def write_selected_contact_sheet(output: Path, image_stem: str, original_image: 
             sheet.paste(crop, (x0 + (thumb_w - crop.width) // 2, y0))
             if row_kind == "reference_roi":
                 label = (
-                    f"{row.get('reference_roi_id')}\n"
-                    f"px={row.get('roi_area_pixels')} blue={row.get('roi_blue_pixels')}\n"
-                    f"blue%={row.get('roi_blue_pixel_percent')} inner=({bbox_x},{bbox_y},{bbox_w},{bbox_h})"
+                    f"ROI {idx + 1} | src={row.get('source_object_id')}\n"
+                    f"area={row.get('roi_area_pixels')} | blue={as_float(row.get('roi_blue_pixel_percent')):.2f}%\n"
+                    f"inner=({bbox_x},{bbox_y},{bbox_w},{bbox_h})"
                 )
             else:
                 label = (
@@ -847,6 +847,12 @@ def append_qc_status(qc_status: str, warning: str) -> str:
     parts = [part for part in str(qc_status or "PASS").split(";") if part and part != "PASS"]
     if warning not in parts:
         parts.append(warning)
+    return ";".join(parts) if parts else "PASS"
+
+
+def remove_qc_status(qc_status: str, *warnings: str) -> str:
+    remove = set(warnings)
+    parts = [part for part in str(qc_status or "PASS").split(";") if part and part != "PASS" and part not in remove]
     return ";".join(parts) if parts else "PASS"
 
 
@@ -1023,7 +1029,7 @@ def rewrite_frame_summary_selection(output: Path, image_stem: str, selected_rows
         rows = list(reader)
     if not rows:
         return ""
-    for column in ["primary_auto_roi_id", "primary_auto_roi_reason", "auto_roi_overlaps_reference_roi", "selected_reference_roi_overlap_fraction"]:
+    for column in ["primary_auto_roi_id", "primary_auto_roi_reason", "auto_roi_overlaps_reference_roi", "selected_reference_roi_overlap_fraction", "selection_unit_type"]:
         if column not in fieldnames:
             fieldnames.append(column)
     row = rows[0]
@@ -1044,6 +1050,9 @@ def rewrite_frame_summary_selection(output: Path, image_stem: str, selected_rows
     row["primary_auto_roi_reason"] = "" if primary_roi is None else str(primary_roi.get("roi_review_note", ""))
     row["auto_roi_overlaps_reference_roi"] = "" if primary_roi is None else str(primary_roi.get("overlaps_reference_roi", "false"))
     row["selected_reference_roi_overlap_fraction"] = ""
+    row["selection_unit_type"] = "auto_roi_regions" if proposals else "object_candidates"
+    if proposals:
+        qc_status = append_qc_status(qc_status, "WARN_NO_REFERENCE_ROI_BOXES_FOUND_AUTO_FALLBACK_USED")
     row["qc_status"] = qc_status
     rewrite_csv_rows(summary_path, rows, fieldnames)
     return qc_status
@@ -1080,17 +1089,24 @@ def measure_reference_roi_pixels(original_image: Path, x: int, y: int, w: int, h
 
 
 def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_rows: list[dict[str, str]], image_name: str, frame_id: str, original_image: Path, params: dict[str, str]) -> list[dict[str, Any]]:
+    from PIL import Image
+
+    with Image.open(original_image) as source:
+        image_width, image_height = source.size
     regions: list[dict[str, Any]] = []
     for row in rejected_rows:
         classification = str(row.get("classification", "")).strip().lower()
         reject_reason = str(row.get("reject_reason", "")).strip().lower()
         area = as_float(row.get("area_px"))
-        if reject_reason != "reject_large_rectangular_artifact" or area < 100000 or classification == "border_object":
-            continue
         x = round(as_float(row.get("bbox_x")))
         y = round(as_float(row.get("bbox_y")))
         w = max(1, round(as_float(row.get("bbox_w") or row.get("bbox_width"), 1)))
         h = max(1, round(as_float(row.get("bbox_h") or row.get("bbox_height"), 1)))
+        is_large_aggregate_seed = reject_reason == "reject_large_rectangular_artifact" and area >= 100000 and classification != "border_object"
+        is_manual_reference_box = classification == "border_object" and reject_reason == "reject_border_artifact" and area >= 50000 and w >= 120 and h >= 120 and w < 0.80 * image_width and h < 0.80 * image_height
+        if not is_large_aggregate_seed and not is_manual_reference_box:
+            continue
+        source_reason = "large_rejected_aggregate_roi_seed" if is_large_aggregate_seed else "detected_black_reference_box_border_seed"
         margin = max(8, min(24, round(min(w, h) * 0.03)))
         inner_x = x + margin
         inner_y = y + margin
@@ -1112,7 +1128,7 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
             "selected_for_frame_summary": "true",
             "selection_unit_type": "reference_roi_regions",
             "source_object_id": str(row.get("object_id", "")),
-            "source_reason": "large_rejected_aggregate_roi_seed",
+            "source_reason": source_reason,
             "roi_bbox_x": x,
             "roi_bbox_y": y,
             "roi_bbox_w": w,
@@ -1121,7 +1137,7 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
             "roi_inner_y": inner_y,
             "roi_inner_w": inner_w,
             "roi_inner_h": inner_h,
-            "roi_review_note": "reference_roi_region_from_large_aggregate_seed",
+            "roi_review_note": "reference_roi_region_from_large_aggregate_seed" if is_large_aggregate_seed else "reference_roi_region_from_detected_black_box",
         }
         region.update(measurement)
         regions.append(region)
@@ -1156,7 +1172,8 @@ def write_reference_roi_regions_overlay(output: Path, image_stem: str, original_
         ix = int(region["roi_inner_x"]); iy = int(region["roi_inner_y"]); iw = int(region["roi_inner_w"]); ih = int(region["roi_inner_h"])
         draw.rectangle((x, y, x + w, y + h), outline=(255, 0, 0), width=5)
         draw.rectangle((ix, iy, ix + iw, iy + ih), outline=(255, 255, 0), width=4)
-        draw.text((x + 4, max(0, y - 18)), str(region["reference_roi_id"]) + " blue%=" + str(round(as_float(str(region.get("roi_blue_pixel_percent"))), 2)), fill=(255, 0, 0))
+        label = f"ROI {regions.index(region) + 1} src={region.get('source_object_id')} blue={as_float(str(region.get('roi_blue_pixel_percent'))):.1f}%"
+        draw.text((x + 4, max(0, y - 18)), label, fill=(255, 0, 0))
     image.save(output / f"reference_roi_regions_overlay_{image_stem}.jpg", quality=90)
 
 
@@ -1187,7 +1204,8 @@ def rewrite_frame_summary_reference_regions(output: Path, image_stem: str, regio
     total_pixels = sum(as_float(str(region.get("roi_area_pixels"))) for region in regions)
     total_blue = sum(as_float(str(region.get("roi_blue_pixels"))) for region in regions)
     overlap_count = sum(1 for row in accepted_rows if row.get("inside_reference_roi") == "true")
-    qc_status = append_qc_status(rows[0].get("qc_status", "PASS"), "INFO_REFERENCE_ROI_REGIONS_USED")
+    qc_status = remove_qc_status(rows[0].get("qc_status", "PASS"), "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE", "WARN_SELECTED_OUTSIDE_AUTO_ROI", "WARN_SELECTED_FRAME_OBJECT_COUNT")
+    qc_status = append_qc_status(qc_status, "INFO_REFERENCE_ROI_REGIONS_USED")
     if overlap_count == 0:
         qc_status = append_qc_status(qc_status, "WARN_NO_OBJECT_CANDIDATES_INSIDE_REFERENCE_ROI")
     total_blue_percent = (100 * total_blue / total_pixels) if total_pixels > 0 else 0
@@ -1461,6 +1479,7 @@ def append_auto_roi_qc_report(output: Path, proposals: list[dict[str, Any]], qc_
         "\n## Auto ROI proposal review\n\n",
         f"- auto_roi_proposal_count: {len(proposals)}\n",
         f"- selected_objects_constrained_to_auto_roi: {'true' if proposals else 'false'}\n",
+        f"- final_qc_status: {qc_status}\n",
         f"- primary_auto_roi_id: {proposals[0].get('roi_id', '') if proposals else ''}\n",
         f"- primary_auto_roi_reason: {proposals[0].get('roi_review_note', '') if proposals else ''}\n",
         "- selected overlay/contact sheet are regenerated from the final postprocessed selected_for_frame_summary flags.\n",
@@ -1504,7 +1523,7 @@ def write_selected_objects_overlay(output: Path, image_stem: str, original_image
             x = int(as_float(region.get("roi_inner_x"))); y = int(as_float(region.get("roi_inner_y")))
             w = int(as_float(region.get("roi_inner_w"), 1)); h = int(as_float(region.get("roi_inner_h"), 1))
             draw.rectangle((x, y, x + w, y + h), outline=(0, 255, 255), width=6)
-            draw.text((x + 4, max(0, y - 18)), str(region.get("reference_roi_id")) + " blue%=" + str(round(as_float(region.get("roi_blue_pixel_percent")), 2)), fill=(0, 255, 255))
+            draw.text((x + 4, max(0, y - 18)), f"ROI {regions.index(region) + 1} blue={as_float(region.get('roi_blue_pixel_percent')):.1f}%", fill=(0, 255, 255))
     else:
         features_path = output / f"cell_features_{image_stem}.csv"
         with features_path.open("r", encoding="utf-8-sig", newline="") as f:
