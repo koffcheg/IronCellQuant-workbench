@@ -842,12 +842,25 @@ def bbox_intersection_fraction(row: dict[str, str], roi: dict[str, Any]) -> floa
     return (ix * iy) / max(1.0, w * h)
 
 
-def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame_id: str) -> list[dict[str, Any]]:
+def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame_id: str, rejected_rows: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
     accepted = [row for row in rows if str(row.get("accepted_status", "")).strip().lower() == "accepted_cell_candidate"]
-    if not accepted:
+    seeds = list(accepted)
+    for row in rejected_rows or []:
+        classification = str(row.get("classification", "")).strip().lower()
+        reject_reason = str(row.get("reject_reason", "")).strip().lower()
+        area = as_float(row.get("area_px"))
+        if classification == "aggregate_candidate" and reject_reason == "reject_large_rectangular_artifact" and area >= 100000:
+            seed = dict(row)
+            seed["object_pixels"] = str(round(area))
+            seed["blue_pixels"] = "0"
+            seed["roi_seed_status"] = "roi_seed_candidate"
+            seed["roi_seed_reason"] = "roi_seed_large_aggregate_candidate"
+            seed["used_for_auto_roi_proposal"] = "true"
+            seeds.append(seed)
+    if not seeds:
         return []
     margin = 96.0
-    parents = list(range(len(accepted)))
+    parents = list(range(len(seeds)))
 
     def find(index: int) -> int:
         while parents[index] != index:
@@ -863,7 +876,7 @@ def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame
 
     boxes: list[tuple[float, float, float, float]] = []
     expanded: list[tuple[float, float, float, float]] = []
-    for row in accepted:
+    for row in seeds:
         x = as_float(row.get("bbox_x"))
         y = as_float(row.get("bbox_y"))
         w = max(1.0, as_float(row.get("bbox_w") or row.get("bbox_width"), 1.0))
@@ -877,20 +890,30 @@ def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame
             if min(ax2, bx2) >= max(ax1, bx1) and min(ay2, by2) >= max(ay1, by1):
                 union(i, j)
     clusters: dict[int, list[int]] = {}
-    for index in range(len(accepted)):
+    for index in range(len(seeds)):
         clusters.setdefault(find(index), []).append(index)
 
     proposals: list[dict[str, Any]] = []
     for members in clusters.values():
-        total_pixels = sum(as_float(accepted[index].get("object_pixels")) for index in members)
-        total_blue = sum(as_float(accepted[index].get("blue_pixels")) for index in members)
+        total_pixels = sum(as_float(seeds[index].get("object_pixels")) for index in members)
+        total_blue = sum(as_float(seeds[index].get("blue_pixels")) for index in members)
         if len(members) < 3 and total_pixels < 3000:
             continue
         x1 = min(boxes[index][0] for index in members)
         y1 = min(boxes[index][1] for index in members)
         x2 = max(boxes[index][2] for index in members)
         y2 = max(boxes[index][3] for index in members)
-        score = total_pixels + 500 * len(members)
+        large_seed_count = 0
+        for index in members:
+            if str(seeds[index].get("roi_seed_reason", "")) == "roi_seed_large_aggregate_candidate":
+                large_seed_count += 1
+        near_full = total_pixels > 0 and (100 * total_blue / total_pixels) >= 99
+        score = total_pixels + 500 * len(members) + 250000 * large_seed_count
+        note = "roi_seed_clustered_cell_material"
+        if large_seed_count > 0:
+            note = "roi_seed_large_aggregate_candidate"
+        if near_full and large_seed_count == 0:
+            note = "roi_reject_diffuse_full_blue_region"
         proposals.append({
             "image_name": image_name,
             "frame_id": frame_id,
@@ -903,8 +926,10 @@ def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame
             "roi_total_blue_pixels": round(total_blue),
             "roi_blue_pixel_percent": 100 * total_blue / total_pixels if total_pixels > 0 else 0,
             "roi_selection_score": score,
-            "roi_review_note": "auto_cluster_from_accepted_cell_material_candidates",
+            "roi_warn_near_full_blue_dominated": "true" if near_full else "false",
+            "roi_review_note": note,
         })
+    proposals = [proposal for proposal in proposals if proposal.get("roi_review_note") != "roi_reject_diffuse_full_blue_region"]
     proposals.sort(key=lambda roi: (float(roi["roi_selection_score"]), int(roi["roi_candidate_object_count"])), reverse=True)
     proposals = proposals[:3]
     for index, proposal in enumerate(proposals, start=1):
@@ -926,6 +951,7 @@ def write_roi_proposals_csv(output: Path, image_stem: str, proposals: list[dict[
         "roi_total_blue_pixels",
         "roi_blue_pixel_percent",
         "roi_selection_score",
+        "roi_warn_near_full_blue_dominated",
         "roi_review_note",
     ]
     with (output / f"roi_proposals_{image_stem}.csv").open("w", encoding="utf-8-sig", newline="") as f:
@@ -986,12 +1012,17 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or [])
         rows = list(reader)
-    for column in ["auto_roi_id", "inside_auto_roi", "auto_roi_overlap_fraction", "auto_roi_selection_note"]:
+    for column in ["auto_roi_id", "inside_auto_roi", "auto_roi_overlap_fraction", "auto_roi_selection_note", "roi_seed_status", "roi_seed_reason", "used_for_auto_roi_proposal"]:
         if column not in fieldnames:
             fieldnames.append(column)
     image_name = rows[0].get("image_name", original_image.name) if rows else original_image.name
     frame_id = rows[0].get("frame_id", make_frame_id(image_stem)) if rows else make_frame_id(image_stem)
-    proposals = derive_auto_roi_proposals(rows, image_name, frame_id)
+    rejected_path = output / "rejected_objects.csv"
+    rejected_rows: list[dict[str, str]] = []
+    if rejected_path.exists():
+        with rejected_path.open("r", encoding="utf-8-sig", newline="") as f:
+            rejected_rows = list(csv.DictReader(f))
+    proposals = derive_auto_roi_proposals(rows, image_name, frame_id, rejected_rows)
 
     accepted_rows: list[dict[str, str]] = []
     for row in rows:
@@ -1000,6 +1031,9 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
             row["inside_auto_roi"] = "false"
             row["auto_roi_overlap_fraction"] = "0.0000"
             row["auto_roi_selection_note"] = "not_accepted_cell_candidate"
+            row["roi_seed_status"] = "not_roi_seed"
+            row["roi_seed_reason"] = "not_accepted_cell_candidate"
+            row["used_for_auto_roi_proposal"] = "false"
             continue
         best_roi: dict[str, Any] | None = None
         best_overlap = 0.0
@@ -1012,6 +1046,9 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
         row["inside_auto_roi"] = "true" if best_overlap >= 0.25 else "false"
         row["auto_roi_overlap_fraction"] = f"{best_overlap:.4f}"
         row["auto_roi_selection_note"] = "inside_auto_roi_selection_pool" if best_overlap >= 0.25 else "outside_auto_roi_not_selected"
+        row["roi_seed_status"] = "roi_seed_candidate" if best_overlap >= 0.25 else "not_roi_seed"
+        row["roi_seed_reason"] = "roi_seed_clustered_cell_material" if best_overlap >= 0.25 else "accepted_candidate_outside_auto_roi"
+        row["used_for_auto_roi_proposal"] = "true" if best_overlap >= 0.25 else "false"
         row["selected_for_frame_summary"] = "false"
         accepted_rows.append(row)
 
@@ -1021,7 +1058,19 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
             row["auto_roi_selection_note"] = "fallback_full_frame_no_auto_roi"
     selection_pool.sort(key=lambda row: (as_float(row.get("selection_score"), 999999999), as_float(row.get("selection_rank_blue"), 999999), -as_float(row.get("object_pixels"))))
     frame_select_top_blue = int(as_float(params.get("frame_select_top_blue"), 20))
-    selected_rows = selection_pool[:frame_select_top_blue]
+    max_near_full_blue = int(as_float(params.get("frame_select_max_near_full_blue"), 5))
+    selected_rows: list[dict[str, str]] = []
+    near_full_selected = 0
+    for row in selection_pool:
+        if len(selected_rows) >= frame_select_top_blue:
+            break
+        is_near_full = as_float(row.get("blue_pixel_percent")) >= 99
+        if is_near_full and near_full_selected >= max_near_full_blue:
+            row["auto_roi_selection_note"] = "not_selected_near_full_blue_cap_reached"
+            continue
+        selected_rows.append(row)
+        if is_near_full:
+            near_full_selected += 1
     for row in selected_rows:
         row["selected_for_frame_summary"] = "true"
         if proposals:
@@ -1073,6 +1122,9 @@ def write_selection_review_candidates(output: Path, image_stem: str) -> None:
         "inside_auto_roi",
         "auto_roi_overlap_fraction",
         "auto_roi_selection_note",
+        "roi_seed_status",
+        "roi_seed_reason",
+        "used_for_auto_roi_proposal",
         "qc_status",
         "review_label",
         "review_reason",
@@ -1104,7 +1156,11 @@ def append_auto_roi_qc_report(output: Path, proposals: list[dict[str, Any]], qc_
         "\n## Auto ROI proposal review\n\n",
         f"- auto_roi_proposal_count: {len(proposals)}\n",
         f"- selected_objects_constrained_to_auto_roi: {'true' if proposals else 'false'}\n",
+        "- selected overlay/contact sheet are regenerated from the final postprocessed selected_for_frame_summary flags.\n",
     ]
+    large_seed_count = sum(1 for proposal in proposals if proposal.get("roi_review_note") == "roi_seed_large_aggregate_candidate")
+    lines.append(f"- large_aggregate_roi_seed_proposal_count: {large_seed_count}\n")
+    lines.append("- near-full-blue selected objects are capped by frame_select_max_near_full_blue; remaining slots are left unfilled rather than backfilled with full-blue candidates.\n")
     if not proposals:
         lines.append("- WARN_NO_AUTO_ROI_PROPOSALS: no deterministic accepted-candidate clusters met ROI proposal criteria; frame-summary selection used full-frame fallback.\n")
     if "WARN_SELECTED_OUTSIDE_AUTO_ROI" in qc_status:
@@ -1273,7 +1329,7 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     write_simple_png(output / f"review_candidates_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
     write_simple_png(output / f"roi_proposals_overlay_{image_stem}.jpg", width, height, (80, 0, 80))
 
-    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,auto_roi_id,inside_auto_roi,auto_roi_overlap_fraction,auto_roi_selection_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
+    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,auto_roi_id,inside_auto_roi,auto_roi_overlap_fraction,auto_roi_selection_note,roi_seed_status,roi_seed_reason,used_for_auto_roi_proposal,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
     (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
     shutil.copy2(output / "cell_features.csv", output / f"cell_features_{image_stem}.csv")
     (output / "blue_pixels_features.csv").write_text("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", encoding="utf-8-sig")
