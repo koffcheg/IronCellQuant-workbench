@@ -152,6 +152,7 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
             f"cell_features_{image_stem}.csv",
             f"frame_features_{image_stem}.csv",
             f"selection_review_candidates_{image_stem}.csv",
+            f"roi_proposals_{image_stem}.csv",
         ])
     if bool_param(params.get("save_overlays", "true")):
         outputs.extend(OVERLAY_EXPECTED_OUTPUTS)
@@ -181,6 +182,7 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
             f"selected_objects_overlay_{image_stem}.jpg",
             f"selected_objects_contact_sheet_{image_stem}.jpg",
             f"review_candidates_contact_sheet_{image_stem}.jpg",
+            f"roi_proposals_overlay_{image_stem}.jpg",
             f"blue_inside_cells_{image_stem}.tif",
         ])
     return outputs
@@ -810,6 +812,227 @@ def write_selected_contact_sheet(output: Path, image_stem: str, original_image: 
     sheet.save(output / f"selected_objects_contact_sheet_{image_stem}.jpg", quality=90)
 
 
+def as_float(value: str | None, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def append_qc_status(qc_status: str, warning: str) -> str:
+    if not warning:
+        return qc_status
+    parts = [part for part in str(qc_status or "PASS").split(";") if part and part != "PASS"]
+    if warning not in parts:
+        parts.append(warning)
+    return ";".join(parts) if parts else "PASS"
+
+
+def bbox_intersection_fraction(row: dict[str, str], roi: dict[str, Any]) -> float:
+    x = as_float(row.get("bbox_x"))
+    y = as_float(row.get("bbox_y"))
+    w = max(1.0, as_float(row.get("bbox_w") or row.get("bbox_width"), 1.0))
+    h = max(1.0, as_float(row.get("bbox_h") or row.get("bbox_height"), 1.0))
+    rx = float(roi["roi_bbox_x"])
+    ry = float(roi["roi_bbox_y"])
+    rw = float(roi["roi_bbox_w"])
+    rh = float(roi["roi_bbox_h"])
+    ix = max(0.0, min(x + w, rx + rw) - max(x, rx))
+    iy = max(0.0, min(y + h, ry + rh) - max(y, ry))
+    return (ix * iy) / max(1.0, w * h)
+
+
+def derive_auto_roi_proposals(rows: list[dict[str, str]], image_name: str, frame_id: str) -> list[dict[str, Any]]:
+    accepted = [row for row in rows if str(row.get("accepted_status", "")).strip().lower() == "accepted_cell_candidate"]
+    if not accepted:
+        return []
+    margin = 96.0
+    parents = list(range(len(accepted)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parents[root_right] = root_left
+
+    boxes: list[tuple[float, float, float, float]] = []
+    expanded: list[tuple[float, float, float, float]] = []
+    for row in accepted:
+        x = as_float(row.get("bbox_x"))
+        y = as_float(row.get("bbox_y"))
+        w = max(1.0, as_float(row.get("bbox_w") or row.get("bbox_width"), 1.0))
+        h = max(1.0, as_float(row.get("bbox_h") or row.get("bbox_height"), 1.0))
+        boxes.append((x, y, x + w, y + h))
+        expanded.append((x - margin, y - margin, x + w + margin, y + h + margin))
+    for i in range(len(expanded)):
+        ax1, ay1, ax2, ay2 = expanded[i]
+        for j in range(i + 1, len(expanded)):
+            bx1, by1, bx2, by2 = expanded[j]
+            if min(ax2, bx2) >= max(ax1, bx1) and min(ay2, by2) >= max(ay1, by1):
+                union(i, j)
+    clusters: dict[int, list[int]] = {}
+    for index in range(len(accepted)):
+        clusters.setdefault(find(index), []).append(index)
+
+    proposals: list[dict[str, Any]] = []
+    for members in clusters.values():
+        total_pixels = sum(as_float(accepted[index].get("object_pixels")) for index in members)
+        total_blue = sum(as_float(accepted[index].get("blue_pixels")) for index in members)
+        if len(members) < 3 and total_pixels < 3000:
+            continue
+        x1 = min(boxes[index][0] for index in members)
+        y1 = min(boxes[index][1] for index in members)
+        x2 = max(boxes[index][2] for index in members)
+        y2 = max(boxes[index][3] for index in members)
+        score = total_pixels + 500 * len(members)
+        proposals.append({
+            "image_name": image_name,
+            "frame_id": frame_id,
+            "roi_bbox_x": round(x1),
+            "roi_bbox_y": round(y1),
+            "roi_bbox_w": max(1, round(x2 - x1)),
+            "roi_bbox_h": max(1, round(y2 - y1)),
+            "roi_candidate_object_count": len(members),
+            "roi_total_object_pixels": round(total_pixels),
+            "roi_total_blue_pixels": round(total_blue),
+            "roi_blue_pixel_percent": 100 * total_blue / total_pixels if total_pixels > 0 else 0,
+            "roi_selection_score": score,
+            "roi_review_note": "auto_cluster_from_accepted_cell_material_candidates",
+        })
+    proposals.sort(key=lambda roi: (float(roi["roi_selection_score"]), int(roi["roi_candidate_object_count"])), reverse=True)
+    proposals = proposals[:3]
+    for index, proposal in enumerate(proposals, start=1):
+        proposal["roi_id"] = f"auto_roi_{index}"
+    return proposals
+
+
+def write_roi_proposals_csv(output: Path, image_stem: str, proposals: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "image_name",
+        "frame_id",
+        "roi_id",
+        "roi_bbox_x",
+        "roi_bbox_y",
+        "roi_bbox_w",
+        "roi_bbox_h",
+        "roi_candidate_object_count",
+        "roi_total_object_pixels",
+        "roi_total_blue_pixels",
+        "roi_blue_pixel_percent",
+        "roi_selection_score",
+        "roi_review_note",
+    ]
+    with (output / f"roi_proposals_{image_stem}.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for proposal in proposals:
+            writer.writerow({name: proposal.get(name, "") for name in fieldnames})
+
+
+def write_roi_proposals_overlay(output: Path, image_stem: str, original_image: Path, proposals: list[dict[str, Any]]) -> None:
+    from PIL import Image, ImageDraw
+
+    with Image.open(original_image) as source:
+        image = source.convert("RGB")
+    draw = ImageDraw.Draw(image)
+    for proposal in proposals:
+        x = int(proposal["roi_bbox_x"])
+        y = int(proposal["roi_bbox_y"])
+        w = int(proposal["roi_bbox_w"])
+        h = int(proposal["roi_bbox_h"])
+        draw.rectangle((x, y, x + w, y + h), outline=(255, 0, 255), width=6)
+        draw.text((x + 4, max(0, y - 18)), str(proposal["roi_id"]), fill=(255, 0, 255))
+    image.save(output / f"roi_proposals_overlay_{image_stem}.jpg", quality=90)
+
+
+def rewrite_frame_summary_selection(output: Path, image_stem: str, selected_rows: list[dict[str, str]], proposals: list[dict[str, Any]]) -> str:
+    summary_path = output / f"frame_features_{image_stem}.csv"
+    if not summary_path.exists():
+        return ""
+    with summary_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    if not rows:
+        return ""
+    row = rows[0]
+    selected_pixels = sum(as_float(item.get("object_pixels")) for item in selected_rows)
+    selected_blue = sum(as_float(item.get("blue_pixels")) for item in selected_rows)
+    selected_fraction = selected_blue / selected_pixels if selected_pixels > 0 else 0
+    row["selected_frame_object_count"] = str(len(selected_rows))
+    row["selected_frame_object_ids"] = "|".join(str(item.get("object_id", "")) for item in selected_rows)
+    row["selected_object_pixels"] = f"{selected_pixels:.0f}"
+    row["selected_blue_pixels"] = f"{selected_blue:.0f}"
+    row["selected_blue_pixel_percent"] = f"{100 * selected_fraction:.4f}"
+    qc_status = row.get("qc_status", "PASS")
+    if not proposals:
+        qc_status = append_qc_status(qc_status, "WARN_NO_AUTO_ROI_PROPOSALS")
+    elif any(str(item.get("inside_auto_roi", "")).lower() != "true" for item in selected_rows):
+        qc_status = append_qc_status(qc_status, "WARN_SELECTED_OUTSIDE_AUTO_ROI")
+    row["qc_status"] = qc_status
+    rewrite_csv_rows(summary_path, rows, fieldnames)
+    return qc_status
+
+
+def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> tuple[list[dict[str, Any]], str]:
+    features_path = output / f"cell_features_{image_stem}.csv"
+    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    for column in ["auto_roi_id", "inside_auto_roi", "auto_roi_overlap_fraction", "auto_roi_selection_note"]:
+        if column not in fieldnames:
+            fieldnames.append(column)
+    image_name = rows[0].get("image_name", original_image.name) if rows else original_image.name
+    frame_id = rows[0].get("frame_id", make_frame_id(image_stem)) if rows else make_frame_id(image_stem)
+    proposals = derive_auto_roi_proposals(rows, image_name, frame_id)
+
+    accepted_rows: list[dict[str, str]] = []
+    for row in rows:
+        if str(row.get("accepted_status", "")).strip().lower() != "accepted_cell_candidate":
+            row["auto_roi_id"] = ""
+            row["inside_auto_roi"] = "false"
+            row["auto_roi_overlap_fraction"] = "0.0000"
+            row["auto_roi_selection_note"] = "not_accepted_cell_candidate"
+            continue
+        best_roi: dict[str, Any] | None = None
+        best_overlap = 0.0
+        for proposal in proposals:
+            overlap = bbox_intersection_fraction(row, proposal)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_roi = proposal
+        row["auto_roi_id"] = "" if best_roi is None else str(best_roi["roi_id"])
+        row["inside_auto_roi"] = "true" if best_overlap >= 0.25 else "false"
+        row["auto_roi_overlap_fraction"] = f"{best_overlap:.4f}"
+        row["auto_roi_selection_note"] = "inside_auto_roi_selection_pool" if best_overlap >= 0.25 else "outside_auto_roi_not_selected"
+        row["selected_for_frame_summary"] = "false"
+        accepted_rows.append(row)
+
+    selection_pool = [row for row in accepted_rows if str(row.get("inside_auto_roi", "")).lower() == "true"] if proposals else accepted_rows
+    if not proposals:
+        for row in accepted_rows:
+            row["auto_roi_selection_note"] = "fallback_full_frame_no_auto_roi"
+    selection_pool.sort(key=lambda row: (as_float(row.get("selection_score"), 999999999), as_float(row.get("selection_rank_blue"), 999999), -as_float(row.get("object_pixels"))))
+    frame_select_top_blue = int(as_float(params.get("frame_select_top_blue"), 20))
+    selected_rows = selection_pool[:frame_select_top_blue]
+    for row in selected_rows:
+        row["selected_for_frame_summary"] = "true"
+        if proposals:
+            row["auto_roi_selection_note"] = "selected_inside_auto_roi"
+    rewrite_csv_rows(features_path, rows, fieldnames)
+    qc_status = rewrite_frame_summary_selection(output, image_stem, selected_rows, proposals)
+    write_roi_proposals_csv(output, image_stem, proposals)
+    write_roi_proposals_overlay(output, image_stem, original_image, proposals)
+    return proposals, qc_status
+
+
 def read_qc_status(output: Path, image_stem: str) -> str:
     summary_path = output / f"frame_features_{image_stem}.csv"
     if not summary_path.exists():
@@ -846,6 +1069,10 @@ def write_selection_review_candidates(output: Path, image_stem: str) -> None:
         "selection_penalty_full_blue",
         "warn_full_blue_candidate",
         "selection_review_note",
+        "auto_roi_id",
+        "inside_auto_roi",
+        "auto_roi_overlap_fraction",
+        "auto_roi_selection_note",
         "qc_status",
         "review_label",
         "review_reason",
@@ -867,6 +1094,43 @@ def write_selection_review_candidates(output: Path, image_stem: str) -> None:
             review_row["review_note"] = ""
             writer.writerow(review_row)
     validate_public_metadata(review_path)
+
+
+def append_auto_roi_qc_report(output: Path, proposals: list[dict[str, Any]], qc_status: str) -> None:
+    report_path = output / "extended_qc_report.md"
+    if not report_path.exists():
+        return
+    lines = [
+        "\n## Auto ROI proposal review\n\n",
+        f"- auto_roi_proposal_count: {len(proposals)}\n",
+        f"- selected_objects_constrained_to_auto_roi: {'true' if proposals else 'false'}\n",
+    ]
+    if not proposals:
+        lines.append("- WARN_NO_AUTO_ROI_PROPOSALS: no deterministic accepted-candidate clusters met ROI proposal criteria; frame-summary selection used full-frame fallback.\n")
+    if "WARN_SELECTED_OUTSIDE_AUTO_ROI" in qc_status:
+        lines.append("- WARN_SELECTED_OUTSIDE_AUTO_ROI: one or more selected objects were not inside an auto ROI proposal.\n")
+    lines.append("- Black rectangular boxes, when present, are optional reference guides only; auto ROI proposals are derived from accepted Weka/postfilter cell-material candidates.\n")
+    with report_path.open("a", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def write_selected_objects_overlay(output: Path, image_stem: str, original_image: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    features_path = output / f"cell_features_{image_stem}.csv"
+    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = [row for row in csv.DictReader(f) if str(row.get("selected_for_frame_summary", "")).lower() == "true"]
+    with Image.open(original_image) as source:
+        image = source.convert("RGB")
+    draw = ImageDraw.Draw(image)
+    for row in rows:
+        x = int(as_float(row.get("bbox_x")))
+        y = int(as_float(row.get("bbox_y")))
+        w = int(as_float(row.get("bbox_w") or row.get("bbox_width"), 1))
+        h = int(as_float(row.get("bbox_h") or row.get("bbox_height"), 1))
+        draw.rectangle((x, y, x + w, y + h), outline=(0, 255, 255), width=6)
+        draw.text((x + 4, max(0, y - 18)), f"#{row.get('object_id')}", fill=(0, 255, 255))
+    image.save(output / f"selected_objects_overlay_{image_stem}.jpg", quality=90)
 
 
 def write_review_candidates_contact_sheet(output: Path, image_stem: str, original_image: Path) -> None:
@@ -925,8 +1189,11 @@ def postprocess_outputs(output: Path, image_stem: str, original_image: Path, par
     write_blue_pixels_xlsx(output)
     copy_final_named_outputs(output, image_stem)
     normalize_public_outputs_metadata(output, image_stem, original_image, short_path_used)
+    proposals, qc_status = apply_auto_roi_selection(output, image_stem, original_image, params)
+    append_auto_roi_qc_report(output, proposals, qc_status)
     write_selection_review_candidates(output, image_stem)
     if bool_param(params.get("save_overlays", "true")):
+        write_selected_objects_overlay(output, image_stem, original_image)
         write_selected_contact_sheet(output, image_stem, original_image)
         write_review_candidates_contact_sheet(output, image_stem, original_image)
     move_internal_outputs(output)
@@ -1004,8 +1271,9 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     write_simple_png(output / f"selected_objects_overlay_{image_stem}.jpg", width, height, (0, 80, 80))
     write_simple_png(output / f"selected_objects_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
     write_simple_png(output / f"review_candidates_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
+    write_simple_png(output / f"roi_proposals_overlay_{image_stem}.jpg", width, height, (80, 0, 80))
 
-    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
+    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,auto_roi_id,inside_auto_roi,auto_roi_overlap_fraction,auto_roi_selection_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
     (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
     shutil.copy2(output / "cell_features.csv", output / f"cell_features_{image_stem}.csv")
     (output / "blue_pixels_features.csv").write_text("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", encoding="utf-8-sig")
@@ -1016,6 +1284,7 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     summary_row = f"{image.name},{width},{height},0,0,0,0,{failure_status}\n"
     (output / "final_frame_summary.csv").write_text(summary_header + summary_row, encoding="utf-8-sig")
     shutil.copy2(output / "final_frame_summary.csv", output / f"frame_features_{image_stem}.csv")
+    write_roi_proposals_csv(output, image_stem, [])
     write_selection_review_candidates(output, image_stem)
     report = (
         "# IronCellQuant single-frame QC report\n\n"
