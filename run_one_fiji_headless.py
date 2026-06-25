@@ -153,6 +153,7 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
             f"frame_features_{image_stem}.csv",
             f"selection_review_candidates_{image_stem}.csv",
             f"roi_proposals_{image_stem}.csv",
+            f"reference_roi_regions_{image_stem}.csv",
         ])
     if bool_param(params.get("save_overlays", "true")):
         outputs.extend(OVERLAY_EXPECTED_OUTPUTS)
@@ -183,6 +184,7 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
             f"selected_objects_contact_sheet_{image_stem}.jpg",
             f"review_candidates_contact_sheet_{image_stem}.jpg",
             f"roi_proposals_overlay_{image_stem}.jpg",
+            f"reference_roi_regions_overlay_{image_stem}.jpg",
             f"blue_inside_cells_{image_stem}.tif",
         ])
     return outputs
@@ -767,11 +769,18 @@ def move_internal_outputs(output: Path) -> None:
 def write_selected_contact_sheet(output: Path, image_stem: str, original_image: Path) -> None:
     from PIL import Image, ImageDraw
 
-    features_path = output / f"cell_features_{image_stem}.csv"
-    if not features_path.exists():
-        features_path = output / "cell_features.csv"
-    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
-        rows = [row for row in csv.DictReader(f) if str(row.get("selected_for_frame_summary", "")).lower() == "true"]
+    if read_selection_unit_type(output, image_stem) == "reference_roi_regions":
+        regions_path = output / f"reference_roi_regions_{image_stem}.csv"
+        with regions_path.open("r", encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        row_kind = "reference_roi"
+    else:
+        features_path = output / f"cell_features_{image_stem}.csv"
+        if not features_path.exists():
+            features_path = output / "cell_features.csv"
+        with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+            rows = [row for row in csv.DictReader(f) if str(row.get("selected_for_frame_summary", "")).lower() == "true"]
+        row_kind = "object"
 
     thumb_w = 220
     thumb_h = 160
@@ -784,10 +793,16 @@ def write_selected_contact_sheet(output: Path, image_stem: str, original_image: 
     with Image.open(original_image) as source:
         source = source.convert("RGB")
         for idx, row in enumerate(rows):
-            bbox_x = int(float(row.get("bbox_x") or 0))
-            bbox_y = int(float(row.get("bbox_y") or 0))
-            bbox_w = int(float(row.get("bbox_w") or row.get("bbox_width") or 1))
-            bbox_h = int(float(row.get("bbox_h") or row.get("bbox_height") or 1))
+            if row_kind == "reference_roi":
+                bbox_x = int(float(row.get("roi_inner_x") or 0))
+                bbox_y = int(float(row.get("roi_inner_y") or 0))
+                bbox_w = int(float(row.get("roi_inner_w") or 1))
+                bbox_h = int(float(row.get("roi_inner_h") or 1))
+            else:
+                bbox_x = int(float(row.get("bbox_x") or 0))
+                bbox_y = int(float(row.get("bbox_y") or 0))
+                bbox_w = int(float(row.get("bbox_w") or row.get("bbox_width") or 1))
+                bbox_h = int(float(row.get("bbox_h") or row.get("bbox_height") or 1))
             pad = 12
             left = max(0, bbox_x - pad)
             top = max(0, bbox_y - pad)
@@ -1027,13 +1042,139 @@ def rewrite_frame_summary_selection(output: Path, image_stem: str, selected_rows
     return qc_status
 
 
+def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_rows: list[dict[str, str]], image_name: str, frame_id: str) -> list[dict[str, Any]]:
+    regions: list[dict[str, Any]] = []
+    for row in rejected_rows:
+        classification = str(row.get("classification", "")).strip().lower()
+        reject_reason = str(row.get("reject_reason", "")).strip().lower()
+        area = as_float(row.get("area_px"))
+        if reject_reason != "reject_large_rectangular_artifact" or area < 100000 or classification == "border_object":
+            continue
+        x = round(as_float(row.get("bbox_x")))
+        y = round(as_float(row.get("bbox_y")))
+        w = max(1, round(as_float(row.get("bbox_w") or row.get("bbox_width"), 1)))
+        h = max(1, round(as_float(row.get("bbox_h") or row.get("bbox_height"), 1)))
+        margin = max(8, min(24, round(min(w, h) * 0.03)))
+        inner_x = x + margin
+        inner_y = y + margin
+        inner_w = max(1, w - 2 * margin)
+        inner_h = max(1, h - 2 * margin)
+        region = {
+            "image_name": image_name,
+            "frame_id": frame_id,
+            "reference_roi_id": f"{frame_id}_reference_roi_{len(regions) + 1}",
+            "source_object_id": str(row.get("object_id", "")),
+            "source_reason": "large_rejected_aggregate_roi_seed",
+            "roi_bbox_x": x,
+            "roi_bbox_y": y,
+            "roi_bbox_w": w,
+            "roi_bbox_h": h,
+            "roi_inner_x": inner_x,
+            "roi_inner_y": inner_y,
+            "roi_inner_w": inner_w,
+            "roi_inner_h": inner_h,
+            "roi_area_pixels": inner_w * inner_h,
+            "roi_blue_pixels": 0.0,
+            "roi_blue_pixel_percent": 0.0,
+            "roi_review_note": "reference_roi_region_from_large_aggregate_seed",
+        }
+        blue_pixels = 0.0
+        for accepted in accepted_rows:
+            overlap = bbox_intersection_fraction(accepted, {"roi_bbox_x": inner_x, "roi_bbox_y": inner_y, "roi_bbox_w": inner_w, "roi_bbox_h": inner_h})
+            if overlap > 0:
+                blue_pixels += as_float(accepted.get("blue_pixels")) * overlap
+        region["roi_blue_pixels"] = round(blue_pixels)
+        region["roi_blue_pixel_percent"] = 100 * blue_pixels / max(1, inner_w * inner_h)
+        regions.append(region)
+    return regions
+
+
+def write_reference_roi_regions_csv(output: Path, image_stem: str, regions: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "image_name", "frame_id", "reference_roi_id", "source_object_id", "source_reason",
+        "roi_bbox_x", "roi_bbox_y", "roi_bbox_w", "roi_bbox_h",
+        "roi_inner_x", "roi_inner_y", "roi_inner_w", "roi_inner_h",
+        "roi_area_pixels", "roi_blue_pixels", "roi_blue_pixel_percent", "roi_review_note",
+    ]
+    with (output / f"reference_roi_regions_{image_stem}.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for region in regions:
+            writer.writerow({name: region.get(name, "") for name in fieldnames})
+
+
+def write_reference_roi_regions_overlay(output: Path, image_stem: str, original_image: Path, regions: list[dict[str, Any]]) -> None:
+    from PIL import Image, ImageDraw
+
+    with Image.open(original_image) as source:
+        image = source.convert("RGB")
+    draw = ImageDraw.Draw(image)
+    for region in regions:
+        x = int(region["roi_bbox_x"]); y = int(region["roi_bbox_y"]); w = int(region["roi_bbox_w"]); h = int(region["roi_bbox_h"])
+        ix = int(region["roi_inner_x"]); iy = int(region["roi_inner_y"]); iw = int(region["roi_inner_w"]); ih = int(region["roi_inner_h"])
+        draw.rectangle((x, y, x + w, y + h), outline=(255, 0, 0), width=5)
+        draw.rectangle((ix, iy, ix + iw, iy + ih), outline=(255, 255, 0), width=4)
+        draw.text((x + 4, max(0, y - 18)), str(region["reference_roi_id"]), fill=(255, 0, 0))
+    image.save(output / f"reference_roi_regions_overlay_{image_stem}.jpg", quality=90)
+
+
+def read_selection_unit_type(output: Path, image_stem: str) -> str:
+    summary_path = output / f"frame_features_{image_stem}.csv"
+    if not summary_path.exists():
+        return "object_candidates"
+    with summary_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    return rows[0].get("selection_unit_type", "object_candidates") if rows else "object_candidates"
+
+
+def rewrite_frame_summary_reference_regions(output: Path, image_stem: str, regions: list[dict[str, Any]], accepted_rows: list[dict[str, str]], primary_roi: dict[str, Any] | None) -> str:
+    summary_path = output / f"frame_features_{image_stem}.csv"
+    with summary_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    if not rows:
+        return ""
+    for column in [
+        "selected_reference_roi_count", "selected_reference_roi_ids", "selected_reference_roi_pixels",
+        "selected_reference_roi_blue_pixels", "selected_reference_roi_blue_pixel_percent", "selection_unit_type",
+        "primary_auto_roi_id", "primary_auto_roi_reason", "auto_roi_overlaps_reference_roi", "selected_reference_roi_overlap_fraction",
+    ]:
+        if column not in fieldnames:
+            fieldnames.append(column)
+    total_pixels = sum(as_float(str(region.get("roi_area_pixels"))) for region in regions)
+    total_blue = sum(as_float(str(region.get("roi_blue_pixels"))) for region in regions)
+    overlap_count = sum(1 for row in accepted_rows if row.get("inside_reference_roi") == "true")
+    qc_status = append_qc_status(rows[0].get("qc_status", "PASS"), "INFO_REFERENCE_ROI_REGIONS_USED")
+    if overlap_count == 0:
+        qc_status = append_qc_status(qc_status, "WARN_NO_OBJECT_CANDIDATES_INSIDE_REFERENCE_ROI")
+    rows[0]["selected_frame_object_count"] = str(len(regions))
+    rows[0]["selected_frame_object_ids"] = "|".join(str(region.get("reference_roi_id", "")) for region in regions)
+    rows[0]["selected_object_pixels"] = f"{total_pixels:.0f}"
+    rows[0]["selected_blue_pixels"] = f"{total_blue:.0f}"
+    rows[0]["selected_blue_pixel_percent"] = f"{(100 * total_blue / total_pixels) if total_pixels > 0 else 0:.4f}"
+    rows[0]["selected_reference_roi_count"] = str(len(regions))
+    rows[0]["selected_reference_roi_ids"] = "|".join(str(region.get("reference_roi_id", "")) for region in regions)
+    rows[0]["selected_reference_roi_pixels"] = f"{total_pixels:.0f}"
+    rows[0]["selected_reference_roi_blue_pixels"] = f"{total_blue:.0f}"
+    rows[0]["selected_reference_roi_blue_pixel_percent"] = f"{(100 * total_blue / total_pixels) if total_pixels > 0 else 0:.4f}"
+    rows[0]["selection_unit_type"] = "reference_roi_regions"
+    rows[0]["primary_auto_roi_id"] = "" if primary_roi is None else str(primary_roi.get("roi_id", ""))
+    rows[0]["primary_auto_roi_reason"] = "" if primary_roi is None else str(primary_roi.get("roi_review_note", ""))
+    rows[0]["auto_roi_overlaps_reference_roi"] = "true"
+    rows[0]["selected_reference_roi_overlap_fraction"] = "1.0000"
+    rows[0]["qc_status"] = qc_status
+    rewrite_csv_rows(summary_path, rows, fieldnames)
+    return qc_status
+
+
 def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path, params: dict[str, str]) -> tuple[list[dict[str, Any]], str]:
     features_path = output / f"cell_features_{image_stem}.csv"
     with features_path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or [])
         rows = list(reader)
-    for column in ["auto_roi_id", "inside_auto_roi", "auto_roi_overlap_fraction", "auto_roi_selection_note", "roi_seed_status", "roi_seed_reason", "used_for_auto_roi_proposal"]:
+    for column in ["auto_roi_id", "inside_auto_roi", "auto_roi_overlap_fraction", "auto_roi_selection_note", "roi_seed_status", "roi_seed_reason", "used_for_auto_roi_proposal", "reference_roi_id", "inside_reference_roi", "reference_roi_overlap_fraction", "reference_roi_selection_note"]:
         if column not in fieldnames:
             fieldnames.append(column)
     image_name = rows[0].get("image_name", original_image.name) if rows else original_image.name
@@ -1044,6 +1185,8 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
         with rejected_path.open("r", encoding="utf-8-sig", newline="") as f:
             rejected_rows = list(csv.DictReader(f))
     proposals = derive_auto_roi_proposals(rows, image_name, frame_id, rejected_rows)
+    accepted_source_rows = [row for row in rows if str(row.get("accepted_status", "")).strip().lower() == "accepted_cell_candidate"]
+    reference_regions = derive_reference_roi_regions(rejected_rows, accepted_source_rows, image_name, frame_id)
 
     accepted_rows: list[dict[str, str]] = []
     for row in rows:
@@ -1055,6 +1198,10 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
             row["roi_seed_status"] = "not_roi_seed"
             row["roi_seed_reason"] = "not_accepted_cell_candidate"
             row["used_for_auto_roi_proposal"] = "false"
+            row["reference_roi_id"] = ""
+            row["inside_reference_roi"] = "false"
+            row["reference_roi_overlap_fraction"] = "0.0000"
+            row["reference_roi_selection_note"] = "not_accepted_cell_candidate"
             continue
         best_roi: dict[str, Any] | None = None
         best_overlap = 0.0
@@ -1070,8 +1217,33 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
         row["roi_seed_status"] = "roi_seed_candidate" if best_overlap >= 0.25 else "not_roi_seed"
         row["roi_seed_reason"] = "roi_seed_clustered_cell_material" if best_overlap >= 0.25 else "accepted_candidate_outside_auto_roi"
         row["used_for_auto_roi_proposal"] = "true" if best_overlap >= 0.25 else "false"
+        best_reference: dict[str, Any] | None = None
+        best_reference_overlap = 0.0
+        for region in reference_regions:
+            overlap = bbox_intersection_fraction(row, {"roi_bbox_x": region["roi_inner_x"], "roi_bbox_y": region["roi_inner_y"], "roi_bbox_w": region["roi_inner_w"], "roi_bbox_h": region["roi_inner_h"]})
+            if overlap > best_reference_overlap:
+                best_reference_overlap = overlap
+                best_reference = region
+        row["reference_roi_id"] = "" if best_reference is None else str(best_reference["reference_roi_id"])
+        row["inside_reference_roi"] = "true" if best_reference_overlap >= 0.10 else "false"
+        row["reference_roi_overlap_fraction"] = f"{best_reference_overlap:.4f}"
+        row["reference_roi_selection_note"] = "inside_reference_roi" if best_reference_overlap >= 0.10 else "outside_reference_roi"
         row["selected_for_frame_summary"] = "false"
         accepted_rows.append(row)
+
+    if reference_regions:
+        for row in accepted_rows:
+            if row.get("inside_reference_roi") == "true":
+                row["reference_roi_selection_note"] = "object_overlaps_reference_roi_region"
+            else:
+                row["reference_roi_selection_note"] = "not_selected_outside_reference_roi_region"
+        rewrite_csv_rows(features_path, rows, fieldnames)
+        write_reference_roi_regions_csv(output, image_stem, reference_regions)
+        write_reference_roi_regions_overlay(output, image_stem, original_image, reference_regions)
+        qc_status = rewrite_frame_summary_reference_regions(output, image_stem, reference_regions, accepted_rows, proposals[0] if proposals else None)
+        write_roi_proposals_csv(output, image_stem, proposals)
+        write_roi_proposals_overlay(output, image_stem, original_image, proposals)
+        return proposals, qc_status
 
     primary_roi = proposals[0] if proposals else None
     if primary_roi is not None:
@@ -1161,6 +1333,8 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
             rewrite_csv_rows(summary_path, summary_rows, summary_fieldnames)
     write_roi_proposals_csv(output, image_stem, proposals)
     write_roi_proposals_overlay(output, image_stem, original_image, proposals)
+    write_reference_roi_regions_csv(output, image_stem, [])
+    write_reference_roi_regions_overlay(output, image_stem, original_image, [])
     return proposals, qc_status
 
 
@@ -1207,6 +1381,10 @@ def write_selection_review_candidates(output: Path, image_stem: str) -> None:
         "roi_seed_status",
         "roi_seed_reason",
         "used_for_auto_roi_proposal",
+        "reference_roi_id",
+        "inside_reference_roi",
+        "reference_roi_overlap_fraction",
+        "reference_roi_selection_note",
         "qc_status",
         "review_label",
         "review_reason",
@@ -1257,19 +1435,26 @@ def append_auto_roi_qc_report(output: Path, proposals: list[dict[str, Any]], qc_
 def write_selected_objects_overlay(output: Path, image_stem: str, original_image: Path) -> None:
     from PIL import Image, ImageDraw
 
-    features_path = output / f"cell_features_{image_stem}.csv"
-    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
-        rows = [row for row in csv.DictReader(f) if str(row.get("selected_for_frame_summary", "")).lower() == "true"]
     with Image.open(original_image) as source:
         image = source.convert("RGB")
     draw = ImageDraw.Draw(image)
-    for row in rows:
-        x = int(as_float(row.get("bbox_x")))
-        y = int(as_float(row.get("bbox_y")))
-        w = int(as_float(row.get("bbox_w") or row.get("bbox_width"), 1))
-        h = int(as_float(row.get("bbox_h") or row.get("bbox_height"), 1))
-        draw.rectangle((x, y, x + w, y + h), outline=(0, 255, 255), width=6)
-        draw.text((x + 4, max(0, y - 18)), f"#{row.get('object_id')}", fill=(0, 255, 255))
+    if read_selection_unit_type(output, image_stem) == "reference_roi_regions":
+        with (output / f"reference_roi_regions_{image_stem}.csv").open("r", encoding="utf-8-sig", newline="") as f:
+            regions = list(csv.DictReader(f))
+        for region in regions:
+            x = int(as_float(region.get("roi_inner_x"))); y = int(as_float(region.get("roi_inner_y")))
+            w = int(as_float(region.get("roi_inner_w"), 1)); h = int(as_float(region.get("roi_inner_h"), 1))
+            draw.rectangle((x, y, x + w, y + h), outline=(0, 255, 255), width=6)
+            draw.text((x + 4, max(0, y - 18)), str(region.get("reference_roi_id")), fill=(0, 255, 255))
+    else:
+        features_path = output / f"cell_features_{image_stem}.csv"
+        with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+            rows = [row for row in csv.DictReader(f) if str(row.get("selected_for_frame_summary", "")).lower() == "true"]
+        for row in rows:
+            x = int(as_float(row.get("bbox_x"))); y = int(as_float(row.get("bbox_y")))
+            w = int(as_float(row.get("bbox_w") or row.get("bbox_width"), 1)); h = int(as_float(row.get("bbox_h") or row.get("bbox_height"), 1))
+            draw.rectangle((x, y, x + w, y + h), outline=(0, 255, 255), width=6)
+            draw.text((x + 4, max(0, y - 18)), f"#{row.get('object_id')}", fill=(0, 255, 255))
     image.save(output / f"selected_objects_overlay_{image_stem}.jpg", quality=90)
 
 
@@ -1412,8 +1597,9 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     write_simple_png(output / f"selected_objects_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
     write_simple_png(output / f"review_candidates_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
     write_simple_png(output / f"roi_proposals_overlay_{image_stem}.jpg", width, height, (80, 0, 80))
+    write_simple_png(output / f"reference_roi_regions_overlay_{image_stem}.jpg", width, height, (80, 80, 0))
 
-    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,auto_roi_id,inside_auto_roi,auto_roi_overlap_fraction,auto_roi_selection_note,roi_seed_status,roi_seed_reason,used_for_auto_roi_proposal,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
+    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,auto_roi_id,inside_auto_roi,auto_roi_overlap_fraction,auto_roi_selection_note,roi_seed_status,roi_seed_reason,used_for_auto_roi_proposal,reference_roi_id,inside_reference_roi,reference_roi_overlap_fraction,reference_roi_selection_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
     (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
     shutil.copy2(output / "cell_features.csv", output / f"cell_features_{image_stem}.csv")
     (output / "blue_pixels_features.csv").write_text("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", encoding="utf-8-sig")
@@ -1425,6 +1611,7 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
     (output / "final_frame_summary.csv").write_text(summary_header + summary_row, encoding="utf-8-sig")
     shutil.copy2(output / "final_frame_summary.csv", output / f"frame_features_{image_stem}.csv")
     write_roi_proposals_csv(output, image_stem, [])
+    write_reference_roi_regions_csv(output, image_stem, [])
     write_selection_review_candidates(output, image_stem)
     report = (
         "# IronCellQuant single-frame QC report\n\n"
