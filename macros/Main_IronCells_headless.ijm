@@ -492,22 +492,7 @@ File.append(originalFileName + "," + groupName + ",all_cleaned_cell_material,fra
 
 if (saveOverlays == 1) {
     checkpoint("before_save_stage1_masks");
-    selectWindow(cellMaskTitle);
-    saveAs("Tiff", outputDir + "/cellmask.tif");
-    selectWindow("Original_RGB");
-    run("Duplicate...", "title=Cell_Pixels_Visualization");
-    selectWindow(cellMaskTitle);
-    run("Create Selection");
-    if (selectionType() != -1) {
-        selectWindow("Cell_Pixels_Visualization");
-        run("Restore Selection");
-        setForegroundColor(255,0,255);
-        run("Fill", "slice");
-        run("Select None");
-    }
-    saveAs("Png", outputDir + "/vis_cellpixels.png");
-    selectWindow("Blue_Pixels_Mask");
-    saveAs("Tiff", outputDir + "/blue_inside_cells.tif");
+    logLine("Skipping legacy stage1 mask save; final accepted mask save path handles cellmask/visualization outputs.");
     checkpoint("after_save_stage1_masks");
 }
 
