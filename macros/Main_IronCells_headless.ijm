@@ -1,5 +1,5 @@
 // Main_IronCells_headless.ijm
-// Fiji/ImageJ headless MVP for preliminary relative iron-staining quantification.
+// Fiji/ImageJ headless Stage 1 single-frame cell-material / ROI-like region analysis.
 // Python only launches Fiji, passes parameters, validates outputs, and stores run metadata.
 
 requires("1.53");
@@ -14,28 +14,35 @@ originalLongPath = getArgString(arg, "original_long_path", inputPath);
 originalFileName = getArgString(arg, "original_file_name", "");
 groupName = getArgString(arg, "group_name", "unknown");
 shortPathUsed = getArgString(arg, "short_path_used", "");
+wekaModelPath = getArgString(arg, "weka_model", "");
+wekaFailureStatus = "";
+wekaTileSize = parseFloat(getArgString(arg, "weka_tile_size", "768"));
+wekaTileOverlap = parseFloat(getArgString(arg, "weka_tile_overlap", "64"));
+referenceRoiOnly = getArgBool(arg, "reference_roi_only", 0);
+referenceRoiManifestPath = getArgString(arg, "reference_roi_manifest", "");
+referenceRoiCount = 0;
 
 thresholdMethod = getArgString(arg, "threshold_method", "Li");
-thresholdMode = getArgString(arg, "threshold_mode", "dark");
+thresholdMode = getArgString(arg, "threshold_mode", "bright");
 backgroundRolling = parseFloat(getArgString(arg, "background_rolling", "80"));
 medianRadius = parseFloat(getArgString(arg, "median_radius", "2"));
 contrastSaturated = parseFloat(getArgString(arg, "contrast_saturated", "0.35"));
 morphOpenIterations = parseFloat(getArgString(arg, "morph_open_iterations", "0"));
-morphCloseIterations = parseFloat(getArgString(arg, "morph_close_iterations", "1"));
+morphCloseIterations = parseFloat(getArgString(arg, "morph_close_iterations", "2"));
 fillHoles = getArgBool(arg, "fill_holes", 1);
 metadataBarHeight = parseFloat(getArgString(arg, "metadata_bar_height", "120"));
 
-particleExtractMinArea = parseFloat(getArgString(arg, "particle_extract_min_area", "10"));
+particleExtractMinArea = parseFloat(getArgString(arg, "particle_extract_min_area", "100"));
 particleExtractMaxArea = parseFloat(getArgString(arg, "particle_extract_max_area", "2000000"));
-minNoiseArea = parseFloat(getArgString(arg, "min_noise_area", "10"));
-minSingleCellArea = parseFloat(getArgString(arg, "min_single_cell_area", "40"));
-maxSingleCellArea = parseFloat(getArgString(arg, "max_single_cell_area", "50000"));
-minAggregateArea = parseFloat(getArgString(arg, "min_aggregate_area", "50000"));
+minNoiseArea = parseFloat(getArgString(arg, "min_noise_area", "100"));
+minSingleCellArea = parseFloat(getArgString(arg, "min_single_cell_area", "200"));
+maxSingleCellArea = parseFloat(getArgString(arg, "max_single_cell_area", "3000"));
+minAggregateArea = parseFloat(getArgString(arg, "min_aggregate_area", "3000"));
 maxAggregateArea = parseFloat(getArgString(arg, "max_aggregate_area", "2000000"));
-maxSingleCellAspect = parseFloat(getArgString(arg, "max_single_cell_aspect", "10"));
-maxAggregateAspect = parseFloat(getArgString(arg, "max_aggregate_aspect", "30"));
+maxSingleCellAspect = parseFloat(getArgString(arg, "max_single_cell_aspect", "4"));
+maxAggregateAspect = parseFloat(getArgString(arg, "max_aggregate_aspect", "8"));
 excludeBorderObjects = getArgBool(arg, "exclude_border_objects", 1);
-borderMarginPx = parseFloat(getArgString(arg, "border_margin_px", "2"));
+borderMarginPx = parseFloat(getArgString(arg, "border_margin_px", "20"));
 
 blueMin = parseFloat(getArgString(arg, "blue_min", "120"));
 blueOverRed = parseFloat(getArgString(arg, "blue_over_red", "20"));
@@ -48,7 +55,11 @@ contourWidth = parseFloat(getArgString(arg, "contour_width", "6"));
 previewMaxSize = parseFloat(getArgString(arg, "final_overlay_preview_max_size", "1600"));
 minExpectedAcceptedObjects = parseFloat(getArgString(arg, "min_expected_accepted_objects", "1"));
 minStableAcceptedObjects = parseFloat(getArgString(arg, "min_stable_accepted_objects", "3"));
+maxStableAcceptedObjects = parseFloat(getArgString(arg, "max_stable_accepted_objects", "40"));
 minStableAcceptedPixels = parseFloat(getArgString(arg, "min_stable_accepted_pixels", "500"));
+frameSelectTopSize = parseFloat(getArgString(arg, "frame_select_top_size", "40"));
+frameSelectTopBlue = parseFloat(getArgString(arg, "frame_select_top_blue", "20"));
+frameSelectMaxNearFullBlue = parseFloat(getArgString(arg, "frame_select_max_near_full_blue", "5"));
 
 File.makeDirectory(outputDir);
 logPath = outputDir + "/macro_log.txt";
@@ -58,6 +69,11 @@ logLine("Input(short/Fiji): " + inputPath);
 logLine("Input(original): " + originalLongPath);
 logLine("Output: " + outputDir);
 logLine("Group: " + groupName);
+if (wekaModelPath != "") {
+    logLine("Weka model: " + wekaModelPath);
+    logLine("Weka tile size: " + wekaTileSize + " overlap=" + wekaTileOverlap);
+    logLine("Reference ROI only: " + boolText(referenceRoiOnly) + " manifest=" + referenceRoiManifestPath);
+}
 logLine("Feature definition: blue_pixel_fraction = blue_pixels / object_pixels. This is a preliminary blue-pixel optical feature, not a calibrated concentration measurement.");
 
 setBatchMode(true);
@@ -119,22 +135,72 @@ selectWindow(greenTitle); rename("Green_Channel"); greenTitle = "Green_Channel";
 selectWindow(blueTitle); rename("Blue_Channel"); blueTitle = "Blue_Channel";
 checkpoint("after_split_rgb_channels");
 
+if (referenceRoiManifestPath != "") {
+    checkpoint("before_reference_roi_inner_mask");
+    referenceRoiCount = createReferenceRoiInnerMask(referenceRoiManifestPath);
+    logLine("Reference ROI manifest count: " + referenceRoiCount);
+    if (saveOverlays == 1) saveDebugImage("ReferenceRoiInnerMask", "reference_roi_inner_mask.tif");
+    checkpoint("after_reference_roi_inner_mask count=" + referenceRoiCount);
+}
+if (referenceRoiOnly == 1 && referenceRoiCount <= 0) {
+    exit("FAIL_REFERENCE_ROI_NOT_FOUND: reference_roi_only mode requires a non-empty reference_roi_manifest; full-frame Weka is disabled.");
+}
+
+checkpoint("before_prepare_segmentation_gray");
+if (wekaModelPath != "") {
+    checkpoint("before_weka_prediction");
+    wekaFailureStatus = runWekaPrediction(wekaModelPath);
+    if (wekaFailureStatus == "") wekaFailureStatus = ensureWekaCellMaskWindow();
+    if (wekaFailureStatus != "") {
+        logLine(wekaFailureStatus + ": Weka tile inference did not produce a usable stitched cell-material mask.");
+        newImage("CellMaterialMask", "8-bit black", width, height, 1);
+        cellMaskTitle = "CellMaterialMask";
+    } else {
+        requireWindow("WekaCellMaskRaw");
+        rename("CellMaterialMask");
+        cellMaskTitle = "CellMaterialMask";
+    }
+    requireWindow(cellMaskTitle);
+    if (saveOverlays == 1) saveDebugImage(cellMaskTitle, "debug_candidate_mask_raw.tif");
+    checkpoint("after_weka_prediction");
+} else {
 checkpoint("before_prepare_segmentation_gray");
 selectWindow("Original_RGB");
-run("Duplicate...", "title=Segmentation_Gray");
+run("Duplicate...", "title=SegmentationBase");
 run("8-bit");
 if (backgroundRolling > 0) run("Subtract Background...", "rolling=" + backgroundRolling);
 if (medianRadius > 0) run("Median...", "radius=" + medianRadius);
 if (contrastSaturated >= 0) run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
-checkpoint("after_prepare_segmentation_gray");
 
-selectWindow("Segmentation_Gray");
-checkpoint("before_set_auto_threshold");
-setAutoThreshold(thresholdMethod + " " + thresholdMode);
-checkpoint("after_set_auto_threshold");
+requireWindow("SegmentationBase");
+run("Duplicate...", "title=TextureEvidence");
+run("Variance...", "radius=3");
+if (contrastSaturated >= 0) run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
+setAutoThreshold(thresholdMethod + " bright");
 run("Convert to Mask");
-checkpoint("after_convert_segmentation_to_mask");
-cellMaskTitle = "Segmentation_Gray";
+rename("TextureEvidenceMask");
+
+requireWindow("SegmentationBase");
+run("Duplicate...", "title=EdgeEvidence");
+run("Find Edges");
+run("Gaussian Blur...", "sigma=1");
+if (contrastSaturated >= 0) run("Enhance Contrast...", "saturated=" + contrastSaturated + " normalize");
+setAutoThreshold(thresholdMethod + " bright");
+run("Convert to Mask");
+rename("EdgeEvidenceMask");
+
+imageCalculator("OR create", "TextureEvidenceMask", "EdgeEvidenceMask");
+rename("CellMaterialMask");
+cellMaskTitle = "CellMaterialMask";
+requireWindow(cellMaskTitle);
+if (saveOverlays == 1) {
+    saveDebugImage("TextureEvidenceMask", "debug_texture_evidence_mask.tif");
+    saveDebugImage("EdgeEvidenceMask", "debug_edge_evidence_mask.tif");
+    saveDebugImage(cellMaskTitle, "debug_candidate_mask_raw.tif");
+}
+checkpoint("after_prepare_stage1a_texture_contrast_candidate_mask");
+
+}
 
 selectWindow(cellMaskTitle);
 if (morphOpenIterations > 0) {
@@ -153,6 +219,41 @@ if (fillHoles == 1) {
     checkpoint("after_fill_holes");
 }
 checkpoint("after_morphology_block");
+checkpoint("before_clear_border_metadata_artifacts");
+requireWindow(cellMaskTitle);
+setBackgroundColor(0,0,0);
+if (metadataBarHeight > 0) {
+    makeRectangle(0, maxOf(0, height - metadataBarHeight), width, minOf(metadataBarHeight, height));
+    run("Clear", "slice");
+}
+if (borderMarginPx > 0) {
+    makeRectangle(0, 0, width, minOf(borderMarginPx, height)); run("Clear", "slice");
+    makeRectangle(0, maxOf(0, height - borderMarginPx), width, minOf(borderMarginPx, height)); run("Clear", "slice");
+    makeRectangle(0, 0, minOf(borderMarginPx, width), height); run("Clear", "slice");
+    makeRectangle(maxOf(0, width - borderMarginPx), 0, minOf(borderMarginPx, width), height); run("Clear", "slice");
+}
+run("Select None");
+if (referenceRoiCount > 0) {
+    checkpoint("before_roi_gate_cell_material_after_morphology");
+    imageCalculator("AND create", cellMaskTitle, "ReferenceRoiInnerMask");
+    rename("CellMaterialMask_RoiGated");
+    selectWindow(cellMaskTitle);
+    close();
+    selectWindow("CellMaterialMask_RoiGated");
+    rename("CellMaterialMask");
+    cellMaskTitle = "CellMaterialMask";
+    checkpoint("after_roi_gate_cell_material_after_morphology");
+}
+if (saveOverlays == 1) {
+    requireWindow(cellMaskTitle);
+    run("Select None");
+    run("Duplicate...", "title=CellMaterialMaskRawSave");
+    requireWindow("CellMaterialMaskRawSave");
+    saveAs("Tiff", outputDir + "/cellmask_raw.tif");
+    close();
+}
+if (saveOverlays == 1) saveDebugImage(cellMaskTitle, "debug_candidate_mask_cleaned.tif");
+checkpoint("after_clear_border_metadata_artifacts");
 
 checkpoint("before_blue_mask_creation");
 selectWindow(blueTitle);
@@ -171,16 +272,32 @@ imageCalculator("AND create", "Blue_Min_Mask", "Blue_Minus_R");
 rename("Blue_Tmp_1");
 imageCalculator("AND create", "Blue_Tmp_1", "Blue_Minus_G");
 rename("Blue_Candidate_Mask");
+if (referenceRoiCount > 0) {
+    imageCalculator("AND create", "Blue_Candidate_Mask", "ReferenceRoiInnerMask");
+    rename("Blue_Candidate_Mask_RoiGated");
+    selectWindow("Blue_Candidate_Mask");
+    close();
+    selectWindow("Blue_Candidate_Mask_RoiGated");
+    rename("Blue_Candidate_Mask");
+}
 imageCalculator("AND create", "Blue_Candidate_Mask", cellMaskTitle);
-rename("Blue_Pixels_Mask");
-totalBluePixelsInMask = whiteCount("Blue_Pixels_Mask");
+rename("BlueInsideCells");
+if (saveOverlays == 1) {
+    requireWindow("BlueInsideCells");
+    run("Select None");
+    run("Duplicate...", "title=BlueInsideCellsRawSave");
+    requireWindow("BlueInsideCellsRawSave");
+    saveAs("Tiff", outputDir + "/blue_inside_cells_raw.tif");
+    close();
+}
+totalBluePixelsInMask = whiteCount("BlueInsideCells");
 checkpoint("after_blue_mask_creation total_blue_pixels_in_cleaned_mask=" + totalBluePixelsInMask);
 
 checkpoint("before_analyze_particles");
 selectWindow(cellMaskTitle);
 run("Clear Results");
 run("Set Measurements...", "area centroid bounding fit shape mean redirect=None decimal=3");
-run("Analyze Particles...", "size=1-" + particleExtractMaxArea + " circularity=0.00-1.00 display clear");
+run("Analyze Particles...", "size=" + particleExtractMinArea + "-" + particleExtractMaxArea + " circularity=0.00-1.00 display clear");
 nObjects = nResults;
 checkpoint("after_analyze_particles component_count=" + nObjects);
 
@@ -205,37 +322,64 @@ if (whiteAfterMorphology > 0) maskBlueFraction = totalBluePixelsInMask / whiteAf
 componentsGe1 = 0; componentsGe5 = 0; componentsGe10 = 0; componentsGe20 = 0;
 componentsGe50 = 0; componentsGe100 = 0; componentsGe200 = 0; componentsGe500 = 0;
 singleCount = 0; aggregateCount = 0; tooSmallCount = 0; smallFragmentCount = 0;
-tooLargeCount = 0; tooLongCount = 0; borderCount = 0; roiWarningCount = 0; acceptedCount = 0;
+tooLargeCount = 0; tooLongCount = 0; borderCount = 0; roiWarningCount = 0; acceptedCount = 0; blueFullCount = 0;
 totalAcceptedObjectPixels = 0; totalAcceptedBluePixels = 0;
 acceptedRSum = 0; acceptedGSum = 0; acceptedBSum = 0;
 acceptedRSqSum = 0; acceptedGSqSum = 0; acceptedBSqSum = 0;
 acceptedBOverRSum = 0; acceptedBOverRGBSumSum = 0; acceptedGraySum = 0; acceptedGraySqSum = 0;
 
+frameId = sanitizeId(originalFileName);
 allCsv = outputDir + "/all_components_before_filter.csv";
 File.saveString("component_id,area_px,centroid_x,centroid_y,bbox_x,bbox_y,bbox_width,bbox_height,aspect_ratio,touches_border,classification,accepted_for_summary,reject_reason\n", allCsv);
 rejectedCsv = outputDir + "/rejected_objects.csv";
-File.saveString("image_name,group_name,object_id,classification,reject_reason,area_px,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,touches_border,roi_reconstruction_status\n", rejectedCsv);
-objectCsv = outputDir + "/final_object_report.csv";
-File.saveString("image_name,group_name,original_long_path,short_path_used,object_id,object_type,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,area_px,bbox_x,bbox_y,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,mean_R,mean_G,mean_B,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_over_G,B_over_R,B_over_RGB_sum,gray_mean,gray_stddev,roi_area_from_particles,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n", objectCsv);
+File.saveString("image_name,group_name,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,classification,reject_reason,area_px,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,touches_border,roi_reconstruction_status\n", rejectedCsv);
+objectCsv = outputDir + "/cell_features.csv";
+cellFeatureHeader = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n";
+File.saveString(cellFeatureHeader, objectCsv);
 blueCsv = outputDir + "/blue_pixels_features.csv";
 File.saveString("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", blueCsv);
+acceptedFlags = newArray(nObjects); selectedFlags = newArray(nObjects);
+objectPixelsForSelection = newArray(nObjects); bluePixelsForSelection = newArray(nObjects); blueFractionForSelection = newArray(nObjects);
+sizeRankForSelection = newArray(nObjects); blueRankForSelection = newArray(nObjects); selectionScoreForSelection = newArray(nObjects);
+fullBluePenaltyForSelection = newArray(nObjects); fullBlueWarnForSelection = newArray(nObjects); selectionNoteForSelection = newArray(nObjects); objectBaseLines = newArray(nObjects);
 
 if (saveOverlays == 1) {
     checkpoint("before_overlay_setup");
     selectWindow("Original_RGB");
-    run("Duplicate...", "title=Overlay_Combined");
+    run("Duplicate...", "title=RoiOverlay");
     selectWindow("Original_RGB");
-    run("Duplicate...", "title=Review_Detection_Overlay");
+    run("Duplicate...", "title=ReviewDetectionOverlay");
+    selectWindow("Original_RGB");
+    run("Duplicate...", "title=SelectedObjectsOverlay");
     newImage("Accepted_Objects_Mask", "8-bit black", width, height, 1);
+    requireWindow("Original_RGB");
+    run("Select None");
+    run("Duplicate...", "title=VisCellPixelsRaw");
+    requireWindow(cellMaskTitle);
+    run("Create Selection");
+    if (selectionType() != -1) {
+        requireWindow("VisCellPixelsRaw");
+        run("Restore Selection");
+        setForegroundColor(255,0,255);
+        run("Fill", "slice");
+        run("Select None");
+    }
+    requireWindow("VisCellPixelsRaw");
+    saveAs("Png", outputDir + "/vis_cellpixels_raw.png");
     checkpoint("after_overlay_setup");
 }
 
 checkpoint("before_per_object_loop");
 for (i = 0; i < nObjects; i++) {
+    objectId = i + 1;
+    featureRowId = frameId + "_object_" + objectId;
     area = areas[i];
     aspect = maxOf(bws[i], bhs[i]) / maxOf(1, minOf(bws[i], bhs[i]));
-    touchesBorder = objectTouchesBorder(bxs[i], bys[i], bws[i], bhs[i]);
-    classification = classifyObject(area, aspect, touchesBorder);
+    touchesFrameBorder = objectTouchesBorder(bxs[i], bys[i], bws[i], bhs[i]);
+    touchesAnalysisBorder = touchesFrameBorder;
+    if (referenceRoiOnly == 1 || referenceRoiCount > 0) touchesAnalysisBorder = 0;
+    fillRatio = area / maxOf(1, bws[i] * bhs[i]);
+    classification = classifyObject(area, aspect, touchesAnalysisBorder, fillRatio);
     rejectReason = rejectReasonFor(classification, area);
     accepted = isAcceptedClass(classification);
 
@@ -247,17 +391,19 @@ for (i = 0; i < nObjects; i++) {
     if (area >= 100) componentsGe100++;
     if (area >= 200) componentsGe200++;
     if (area >= 500) componentsGe500++;
-    if (classification == "too_small_noise") tooSmallCount++;
+    if (classification == "too_small") tooSmallCount++;
     if (classification == "small_cell_or_fragment") smallFragmentCount++;
+    if (classification == "cell_region_candidate") smallFragmentCount++;
     if (classification == "single_cell_candidate") singleCount++;
     if (classification == "aggregate_candidate") aggregateCount++;
     if (classification == "too_large_artifact") tooLargeCount++;
     if (classification == "too_long_artifact") tooLongCount++;
+    if (classification == "rectangle_or_line_artifact") tooLongCount++;
     if (classification == "border_object") borderCount++;
 
-    File.append((i+1) + "," + d2s(area,0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "\n", allCsv);
+    File.append((i+1) + "," + d2s(area,0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(aspect,4) + "," + boolText(touchesFrameBorder) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "\n", allCsv);
 
-    roiStatus = "not_attempted"; roiArea = 0; roiDelta = 100; meanR = 0; meanG = 0; meanB = 0; stdR = 0; stdG = 0; stdB = 0; minR = 0; minG = 0; minB = 0; maxR = 0; maxG = 0; maxB = 0; grayMean = 0; grayStd = 0; objectPixels = 0; bluePixels = 0;
+    roiStatus = "not_attempted"; roiArea = 0; roiDelta = 100; selectionPenaltyFullBlue = 0; warnFullBlueCandidate = 0; selectionReviewNote = ""; meanR = 0; meanG = 0; meanB = 0; stdR = 0; stdG = 0; stdB = 0; minR = 0; minG = 0; minB = 0; maxR = 0; maxG = 0; maxB = 0; grayMean = 0; grayStd = 0; grayMin = 0; grayMax = 0; objectPixels = 0; bluePixels = 0; roiAreaPixels = round(bws[i]) * round(bhs[i]);
     selectWindow(cellMaskTitle);
     recoverObjectRoi(xs[i], ys[i], bxs[i], bys[i], bws[i], bhs[i]);
     if (selectionType() == -1) {
@@ -283,13 +429,21 @@ for (i = 0; i < nObjects; i++) {
         selectWindow(greenTitle); run("Restore Selection"); getStatistics(areaG, meanG, minG, maxG, stdG);
         selectWindow(blueTitle); run("Restore Selection"); getStatistics(areaB, meanB, minB, maxB, stdB);
         selectWindow("Gray_Channel"); run("Restore Selection"); getStatistics(areaGray, grayMean, grayMin, grayMax, grayStd);
-        selectWindow("Blue_Pixels_Mask"); run("Restore Selection");
+        selectWindow("BlueInsideCells"); run("Restore Selection");
         counts = countRoiPixelsInBbox(bxs[i], bys[i], bws[i], bhs[i]);
         objectPixels = counts[0];
         bluePixels = counts[1];
     }
 
     if (objectPixels > 0) fraction = bluePixels / objectPixels; else fraction = 0;
+    if (accepted == 1) {
+        postRejectReason = postFilterRejectReason(objectPixels, roiAreaPixels, bws[i], bhs[i], aspect, fillRatio, touchesAnalysisBorder, fraction);
+        if (postRejectReason != "") {
+            accepted = 0;
+            classification = postRejectReason;
+            rejectReason = postRejectReason;
+        }
+    }
     epsilon = 0.000001;
     rOverG = meanR / maxOf(epsilon, meanG);
     bOverR = meanB / maxOf(epsilon, meanR);
@@ -299,6 +453,7 @@ for (i = 0; i < nObjects; i++) {
         acceptedCount++;
         totalAcceptedObjectPixels += objectPixels;
         totalAcceptedBluePixels += bluePixels;
+        if (fraction >= 0.999) blueFullCount++;
         acceptedRSum += meanR * objectPixels; acceptedGSum += meanG * objectPixels; acceptedBSum += meanB * objectPixels;
         acceptedRSqSum += (stdR * stdR + meanR * meanR) * objectPixels;
         acceptedGSqSum += (stdG * stdG + meanG * meanG) * objectPixels;
@@ -307,8 +462,27 @@ for (i = 0; i < nObjects; i++) {
         acceptedBOverRGBSumSum += bOverRgbSum * objectPixels;
         acceptedGraySum += grayMean * objectPixels;
         acceptedGraySqSum += (grayStd * grayStd + grayMean * grayMean) * objectPixels;
-        objectType = classification;
-        File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + (i+1) + "," + objectType + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(stdR,3) + "," + d2s(stdG,3) + "," + d2s(stdB,3) + "," + d2s(minR,0) + "," + d2s(minG,0) + "," + d2s(minB,0) + "," + d2s(maxR,0) + "," + d2s(maxG,0) + "," + d2s(maxB,0) + "," + d2s(rOverG,6) + "," + d2s(bOverR,6) + "," + d2s(bOverRgbSum,6) + "," + d2s(grayMean,3) + "," + d2s(grayStd,3) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus + "\n", objectCsv);
+        objectType = outputObjectType(classification);
+        acceptedFlags[i] = 1;
+        objectPixelsForSelection[i] = objectPixels;
+        bluePixelsForSelection[i] = bluePixels;
+        blueFractionForSelection[i] = fraction;
+        fullBluePlausible = biologicallyPlausibleFullBlue(objectPixels, bws[i], bhs[i], aspect, fillRatio, grayStd);
+        if (fraction >= 0.99) {
+            warnFullBlueCandidate = 1;
+            selectionReviewNote = "warn_nearly_full_blue_candidate";
+            if (fullBluePlausible == 0) {
+                selectionPenaltyFullBlue = 10000;
+                selectionReviewNote = "strongly_deprioritized_nearly_full_blue_artifact_risk";
+            } else {
+                selectionPenaltyFullBlue = 250;
+                selectionReviewNote = "deprioritized_nearly_full_blue_size_shape_plausible";
+            }
+        }
+        fullBluePenaltyForSelection[i] = selectionPenaltyFullBlue;
+        fullBlueWarnForSelection[i] = warnFullBlueCandidate;
+        selectionNoteForSelection[i] = selectionReviewNote;
+        objectBaseLines[i] = objectType + "," + d2s(roiAreaPixels,0) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(stdR,3) + "," + d2s(stdG,3) + "," + d2s(stdB,3) + "," + d2s(minR,0) + "," + d2s(minG,0) + "," + d2s(minB,0) + "," + d2s(maxR,0) + "," + d2s(maxG,0) + "," + d2s(maxB,0) + "," + d2s(rOverG,6) + "," + d2s(bOverR,6) + "," + d2s(bOverRgbSum,6) + "," + d2s(grayMean,3) + "," + d2s(grayStd,3) + "," + d2s(grayMin,0) + "," + d2s(grayMax,0) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus;
         File.append(originalFileName + "," + groupName + "," + objectType + "," + (i+1) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "\n", blueCsv);
         if (saveOverlays == 1) {
             if (selectionType() != -1) {
@@ -319,7 +493,7 @@ for (i = 0; i < nObjects; i++) {
             }
         }
     } else {
-        File.append(originalFileName + "," + groupName + "," + (i+1) + "," + classification + "," + rejectReason + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + roiStatus + "\n", rejectedCsv);
+        File.append(originalFileName + "," + groupName + "," + frameId + "," + objectId + "," + featureRowId + ",weka_candidate,rejected,false," + classification + "," + rejectReason + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + boolText(touchesFrameBorder) + "," + roiStatus + "\n", rejectedCsv);
     }
 
     if (saveOverlays == 1) {
@@ -327,10 +501,89 @@ for (i = 0; i < nObjects; i++) {
             shouldDrawObject = accepted;
             if (drawRejectedObjects == 1) shouldDrawObject = 1;
             if (shouldDrawObject == 1) {
-                drawObjectOverlay(i+1, classification, area, accepted, fraction, bxs[i], bys[i]);
-                if (accepted == 1) drawReviewObjectOverlay(i+1, classification, fraction, bxs[i], bys[i], bws[i], bhs[i]);
+                drawObjectOverlay(objectId, classification, area, accepted, fraction, bxs[i], bys[i]);
+                if (accepted == 1) drawReviewObjectOverlay(objectId, classification, fraction, bxs[i], bys[i], bws[i], bhs[i]);
             }
         }
+    }
+}
+
+selectedCount = 0; selectedNearFullBlueCount = 0; selectedObjectPixels = 0; selectedBluePixels = 0; selectedObjectIds = "";
+for (i = 0; i < nObjects; i++) {
+    if (acceptedFlags[i] == 1) {
+        rankSize = 1;
+        for (j = 0; j < nObjects; j++) {
+            if (acceptedFlags[j] == 1) {
+                if (objectPixelsForSelection[j] > objectPixelsForSelection[i]) rankSize++;
+                if (objectPixelsForSelection[j] == objectPixelsForSelection[i] && j < i) rankSize++;
+            }
+        }
+        sizeRankForSelection[i] = rankSize;
+    }
+}
+for (i = 0; i < nObjects; i++) {
+    if (acceptedFlags[i] == 1) {
+        rankBlue = 1;
+        for (j = 0; j < nObjects; j++) {
+            if (acceptedFlags[j] == 1 && sizeRankForSelection[j] <= frameSelectTopSize) {
+                scoreJ = fullBluePenaltyForSelection[j] + (1 - blueFractionForSelection[j]);
+                scoreI = fullBluePenaltyForSelection[i] + (1 - blueFractionForSelection[i]);
+                if (scoreJ < scoreI) rankBlue++;
+                if (scoreJ == scoreI && sizeRankForSelection[j] < sizeRankForSelection[i]) rankBlue++;
+                if (scoreJ == scoreI && sizeRankForSelection[j] == sizeRankForSelection[i] && j < i) rankBlue++;
+            }
+        }
+        blueRankForSelection[i] = rankBlue;
+        selectionScoreForSelection[i] = sizeRankForSelection[i] * 10000 + rankBlue + fullBluePenaltyForSelection[i];
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget && blueFractionForSelection[i] < 0.99) {
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
+        }
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && selectedCount < frameSelectTopBlue && selectedNearFullBlueCount < frameSelectMaxNearFullBlue && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget && blueFractionForSelection[i] >= 0.99) {
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
+        }
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && selectedCount < frameSelectTopBlue && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget) {
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
+        }
+    }
+}
+if (saveOverlays == 1) {
+    for (i = 0; i < nObjects; i++) {
+        if (selectedFlags[i] == 1) drawSelectedObjectOverlay(i + 1, bxs[i], bys[i], bws[i], bhs[i]);
+    }
+}
+for (i = 0; i < nObjects; i++) {
+    if (acceptedFlags[i] == 1) {
+        File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + frameId + "," + (i+1) + "," + frameId + "_object_" + (i+1) + ",weka_candidate,accepted_cell_candidate," + boolText(selectedFlags[i]) + ",," + d2s(sizeRankForSelection[i],0) + "," + d2s(blueRankForSelection[i],0) + "," + d2s(selectionScoreForSelection[i],3) + "," + d2s(fullBluePenaltyForSelection[i],3) + "," + boolText(fullBlueWarnForSelection[i]) + "," + selectionNoteForSelection[i] + "," + objectBaseLines[i] + "\n", objectCsv);
     }
 }
 checkpoint("after_per_object_loop");
@@ -351,40 +604,81 @@ if (totalAcceptedObjectPixels > 0) {
 }
 acceptedAreaFractionOfFrame = totalAcceptedObjectPixels / framePixels;
 acceptedAreaPercentOfFrame = 100 * acceptedAreaFractionOfFrame;
+if (selectedObjectPixels > 0) selectedFraction = selectedBluePixels / selectedObjectPixels; else selectedFraction = 0;
 File.append(originalFileName + "," + groupName + ",all_accepted_cell_material,frame," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "\n", blueCsv);
 File.append(originalFileName + "," + groupName + ",all_cleaned_cell_material,frame," + d2s(whiteAfterMorphology,0) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "\n", blueCsv);
 
 if (saveOverlays == 1) {
+    checkpoint("before_save_stage1_masks");
+    logLine("Skipping legacy stage1 mask save; final accepted mask save path handles cellmask/visualization outputs.");
+    checkpoint("after_save_stage1_masks");
+}
+
+if (saveOverlays == 1) {
     checkpoint("before_final_overlay_blue_layer");
-    imageCalculator("AND create", "Blue_Pixels_Mask", "Accepted_Objects_Mask");
-    rename("Blue_Accepted_Mask");
-    selectWindow("Blue_Accepted_Mask");
+    requireWindow("BlueInsideCells");
+    requireWindow("Accepted_Objects_Mask");
+    imageCalculator("AND create", "BlueInsideCells", "Accepted_Objects_Mask");
+    rename("BlueAcceptedMask");
+    requireWindow("BlueAcceptedMask");
     run("Create Selection");
     if (selectionType() != -1) {
-        selectWindow("Overlay_Combined");
+        requireWindow("RoiOverlay");
         run("Restore Selection");
         setForegroundColor(0,80,255);
         run("Fill", "slice");
         run("Select None");
     }
-    // Create the lightweight preview before saveAs(Tiff).
-    // In Fiji headless, saveAs can retitle the active image to the saved filename,
-    // so selecting the old window title after saveAs is not reliable.
-    checkpoint("before_save_final_overlay_preview");
-    selectWindow("Overlay_Combined");
-    savePreviewImage();
-    checkpoint("after_save_final_overlay_preview");
 
-    checkpoint("before_save_final_overlay");
-    selectWindow("Overlay_Combined");
-    saveAs("Tiff", outputDir + "/final_analysis_overlay.tif");
-    checkpoint("after_save_final_overlay");
+    checkpoint("before_save_cellmask");
+    requireWindow("Accepted_Objects_Mask");
+    run("Select None");
+    run("Duplicate...", "title=AcceptedCellMaterialMaskSave");
+    requireWindow("AcceptedCellMaterialMaskSave");
+    saveAs("Tiff", outputDir + "/cellmask.tif");
+    close();
+    requireWindow("Accepted_Objects_Mask");
+    checkpoint("after_save_cellmask");
 
-    checkpoint("before_save_review_overlay_preview");
-    saveReviewPreviewImage();
-    checkpoint("after_save_review_overlay_preview");
-    selectWindow("Review_Detection_Overlay");
-    saveAs("Tiff", outputDir + "/review_detection_overlay.tif");
+    checkpoint("before_save_vis_cellpixels");
+    requireWindow("Original_RGB");
+    run("Select None");
+    run("Duplicate...", "title=VisCellPixels");
+    requireWindow("Accepted_Objects_Mask");
+    run("Create Selection");
+    if (selectionType() != -1) {
+        requireWindow("VisCellPixels");
+        run("Restore Selection");
+        setForegroundColor(255,0,255);
+        run("Fill", "slice");
+        run("Select None");
+    }
+    requireWindow("VisCellPixels");
+    saveAs("Png", outputDir + "/vis_cellpixels.png");
+    checkpoint("after_save_vis_cellpixels");
+
+    checkpoint("before_save_blue_inside_cells");
+    requireWindow("BlueAcceptedMask");
+    run("Select None");
+    run("Duplicate...", "title=BlueAcceptedMaskSave");
+    requireWindow("BlueAcceptedMaskSave");
+    saveAs("Tiff", outputDir + "/blue_inside_cells.tif");
+    close();
+    requireWindow("BlueAcceptedMask");
+    checkpoint("after_save_blue_inside_cells");
+
+    checkpoint("before_save_roi_overlay");
+    requireWindow("RoiOverlay");
+    run("Select None");
+    saveAs("Jpeg", outputDir + "/roi_overlay.jpg");
+    checkpoint("after_save_roi_overlay");
+
+    checkpoint("before_save_selected_objects_overlay");
+    requireWindow("SelectedObjectsOverlay");
+    run("Select None");
+    saveAs("Jpeg", outputDir + "/selected_objects_overlay.jpg");
+    saveAs("Jpeg", outputDir + "/cell_objects_overlay_raw.jpg");
+    checkpoint("after_save_selected_objects_overlay");
 }
 
 lowAcceptedAreaWarning = 0;
@@ -392,19 +686,29 @@ if (acceptedCount < minStableAcceptedObjects) lowAcceptedAreaWarning = 1;
 if (totalAcceptedObjectPixels < minStableAcceptedPixels) lowAcceptedAreaWarning = 1;
 
 qcStatus = "PASS";
+if (wekaFailureStatus != "") qcStatus = appendQcStatus(qcStatus, wekaFailureStatus);
+if (acceptedCount == 0) qcStatus = appendQcStatus(qcStatus, "FAIL_NO_ACCEPTED_OBJECTS");
 if (acceptedCount < minExpectedAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_OBJECT_COUNT");
+if (selectedCount < minExpectedAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_SELECTED_FRAME_OBJECT_COUNT");
 if (roiWarningCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_ROI_RECONSTRUCTION");
 if (lowAcceptedAreaWarning == 1) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_AREA");
+if (acceptedCount > maxStableAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_HIGH_ACCEPTED_OBJECT_COUNT");
+if (acceptedCount > 0) { if (blueFullCount / acceptedCount > 0.25) qcStatus = appendQcStatus(qcStatus, "WARN_MANY_FULL_BLUE_OBJECTS"); }
+if (selectedNearFullBlueCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE");
+if (borderCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_BORDER_ARTIFACTS_REMOVED");
+if (nObjects > 0) { if ((tooSmallCount + tooLongCount) / nObjects > 0.50) qcStatus = appendQcStatus(qcStatus, "WARN_MANY_REJECTED_ARTIFACTS"); }
 
 summaryCsv = outputDir + "/final_frame_summary.csv";
-File.saveString("image_name,group_name,original_long_path,short_path_used,image_width,image_height,threshold_method,threshold_mode,background_rolling,median_radius,contrast_saturated,morph_open_iterations,morph_close_iterations,fill_holes,metadata_bar_height,frame_area_pixels,accepted_area_fraction_of_frame,accepted_area_percent_of_frame,particle_extract_min_area,particle_extract_max_area,min_noise_area,min_single_cell_area,max_single_cell_area,min_aggregate_area,max_aggregate_area,max_single_cell_aspect,max_aggregate_aspect,exclude_border_objects,border_margin_px,blue_min,blue_over_red,blue_over_green,min_stable_accepted_objects,min_stable_accepted_pixels,total_cell_material_pixels,cell_material_area_fraction,total_blue_pixels_in_cell_material,blue_pixel_fraction_all_cell_material,blue_pixel_percent_all_cell_material,component_count_total,accepted_object_count,single_cell_candidate_count,aggregate_candidate_count,too_small_noise_count,small_cell_or_fragment_count,too_large_artifact_count,too_long_artifact_count,border_object_count,roi_reconstruction_warning_count,accepted_R_mean,accepted_G_mean,accepted_B_mean,accepted_R_std,accepted_G_std,accepted_B_std,accepted_B_over_R_mean,accepted_B_over_RGB_sum_mean,accepted_gray_stddev,accepted_object_pixels,accepted_blue_pixels,blue_pixel_fraction_all_accepted,blue_pixel_percent_all_accepted,components_area_ge_1,components_area_ge_5,components_area_ge_10,components_area_ge_20,components_area_ge_50,components_area_ge_100,components_area_ge_200,components_area_ge_500,qc_status\n", summaryCsv);
-summaryLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + width + "," + height + "," + thresholdMethod + "," + thresholdMode + "," + backgroundRolling + "," + medianRadius + "," + contrastSaturated + "," + morphOpenIterations + "," + morphCloseIterations + "," + boolText(fillHoles) + "," + metadataBarHeight + "," + d2s(framePixels,0) + "," + d2s(acceptedAreaFractionOfFrame,8) + "," + d2s(acceptedAreaPercentOfFrame,4) + "," + particleExtractMinArea + "," + particleExtractMaxArea + "," + minNoiseArea + "," + minSingleCellArea + "," + maxSingleCellArea + "," + minAggregateArea + "," + maxAggregateArea + "," + maxSingleCellAspect + "," + maxAggregateAspect + "," + boolText(excludeBorderObjects) + "," + borderMarginPx + "," + blueMin + "," + blueOverRed + "," + blueOverGreen + "," + minStableAcceptedObjects + "," + minStableAcceptedPixels + "," + d2s(whiteAfterMorphology,0) + "," + d2s(whiteAfterMorphology/framePixels,8) + "," + d2s(totalBluePixelsInMask,0) + "," + d2s(maskBlueFraction,8) + "," + d2s(100*maskBlueFraction,4) + "," + nObjects + "," + acceptedCount + "," + singleCount + "," + aggregateCount + "," + tooSmallCount + "," + smallFragmentCount + "," + tooLargeCount + "," + tooLongCount + "," + borderCount + "," + roiWarningCount + "," + d2s(acceptedRMean,3) + "," + d2s(acceptedGMean,3) + "," + d2s(acceptedBMean,3) + "," + d2s(acceptedRStd,3) + "," + d2s(acceptedGStd,3) + "," + d2s(acceptedBStd,3) + "," + d2s(acceptedBOverRMean,6) + "," + d2s(acceptedBOverRGBSumMean,6) + "," + d2s(acceptedGrayStddev,3) + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + componentsGe1 + "," + componentsGe5 + "," + componentsGe10 + "," + componentsGe20 + "," + componentsGe50 + "," + componentsGe100 + "," + componentsGe200 + "," + componentsGe500 + "," + qcStatus + "\n";
+summaryHeader = "image_name,group_name,original_long_path,short_path_used,image_width,image_height,threshold_method,threshold_mode,background_rolling,median_radius,contrast_saturated,morph_open_iterations,morph_close_iterations,fill_holes,metadata_bar_height,frame_area_pixels,accepted_area_fraction_of_frame,accepted_area_percent_of_frame,particle_extract_min_area,particle_extract_max_area,min_noise_area,min_single_cell_area,max_single_cell_area,min_aggregate_area,max_aggregate_area,max_single_cell_aspect,max_aggregate_aspect,exclude_border_objects,border_margin_px,blue_min,blue_over_red,blue_over_green,min_stable_accepted_objects,min_stable_accepted_pixels,total_cell_material_pixels,cell_material_area_fraction,total_blue_pixels_in_cell_material,blue_pixel_fraction_all_cell_material,blue_pixel_percent_all_cell_material,selected_frame_object_count,selected_frame_object_ids,selected_object_pixels,selected_blue_pixels,selected_blue_pixel_percent,component_count_total,accepted_object_count,single_cell_candidate_count,aggregate_candidate_count,too_small_noise_count,small_cell_or_fragment_count,too_large_artifact_count,too_long_artifact_count,border_object_count,roi_reconstruction_warning_count,accepted_R_mean,accepted_G_mean,accepted_B_mean,accepted_R_std,accepted_G_std,accepted_B_std,accepted_B_over_R_mean,accepted_B_over_RGB_sum_mean,accepted_gray_stddev,accepted_object_pixels,accepted_blue_pixels,blue_pixel_fraction_all_accepted,blue_pixel_percent_all_accepted,components_area_ge_1,components_area_ge_5,components_area_ge_10,components_area_ge_20,components_area_ge_50,components_area_ge_100,components_area_ge_200,components_area_ge_500,qc_status\n";
+File.saveString(summaryHeader, summaryCsv);
+summaryLine = originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + width + "," + height + "," + thresholdMethod + "," + thresholdMode + "," + backgroundRolling + "," + medianRadius + "," + contrastSaturated + "," + morphOpenIterations + "," + morphCloseIterations + "," + boolText(fillHoles) + "," + metadataBarHeight + "," + d2s(framePixels,0) + "," + d2s(acceptedAreaFractionOfFrame,8) + "," + d2s(acceptedAreaPercentOfFrame,4) + "," + particleExtractMinArea + "," + particleExtractMaxArea + "," + minNoiseArea + "," + minSingleCellArea + "," + maxSingleCellArea + "," + minAggregateArea + "," + maxAggregateArea + "," + maxSingleCellAspect + "," + maxAggregateAspect + "," + boolText(excludeBorderObjects) + "," + borderMarginPx + "," + blueMin + "," + blueOverRed + "," + blueOverGreen + "," + minStableAcceptedObjects + "," + minStableAcceptedPixels + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(acceptedAreaFractionOfFrame,8) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + selectedCount + "," + selectedObjectIds + "," + d2s(selectedObjectPixels,0) + "," + d2s(selectedBluePixels,0) + "," + d2s(100*selectedFraction,4) + "," + nObjects + "," + acceptedCount + "," + singleCount + "," + aggregateCount + "," + tooSmallCount + "," + smallFragmentCount + "," + tooLargeCount + "," + tooLongCount + "," + borderCount + "," + roiWarningCount + "," + d2s(acceptedRMean,3) + "," + d2s(acceptedGMean,3) + "," + d2s(acceptedBMean,3) + "," + d2s(acceptedRStd,3) + "," + d2s(acceptedGStd,3) + "," + d2s(acceptedBStd,3) + "," + d2s(acceptedBOverRMean,6) + "," + d2s(acceptedBOverRGBSumMean,6) + "," + d2s(acceptedGrayStddev,3) + "," + d2s(totalAcceptedObjectPixels,0) + "," + d2s(totalAcceptedBluePixels,0) + "," + d2s(acceptedFraction,8) + "," + d2s(100*acceptedFraction,4) + "," + componentsGe1 + "," + componentsGe5 + "," + componentsGe10 + "," + componentsGe20 + "," + componentsGe50 + "," + componentsGe100 + "," + componentsGe200 + "," + componentsGe500 + "," + qcStatus + "\n";
 File.append(summaryLine, summaryCsv);
 
 writeQcReport(qcStatus);
 checkpoint("after_write_summary_and_qc");
 logLine("component_count_total=" + nObjects);
 logLine("accepted_object_count=" + acceptedCount);
+logLine("selected_frame_object_count=" + selectedCount);
 logLine("roi_reconstruction_warning_count=" + roiWarningCount);
 logLine("blue_pixel_percent_all_accepted=" + d2s(100*acceptedFraction,4));
 logLine("Finished successfully.");
@@ -447,18 +751,18 @@ function countRoiPixelsInBbox(bx, by, bw, bh) {
 
 function drawObjectOverlay(id, classification, area, accepted, fraction, bx, by) {
     if (accepted == 1) { rr=0; gg=255; bb=0; } else { rr=255; gg=120; bb=0; }
-    selectWindow("Overlay_Combined");
+    requireWindow("RoiOverlay");
     run("Restore Selection");
     setLineWidth(contourWidth); setForegroundColor(rr,gg,bb); run("Draw", "slice");
     if (labelObjects == 1) {
         setFont("SansSerif", 18, "bold");
-        drawString("#" + id + " " + classification + " blue=" + d2s(100*fraction,2) + "%", bx, maxOf(20, by-6));
+        drawString("#" + id, bx, maxOf(20, by-6));
     }
     run("Select None");
 }
 
 function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
-    selectWindow("Review_Detection_Overlay");
+    requireWindow("ReviewDetectionOverlay");
     rectX = clampFloor(bx, 0, width - 1);
     rectY = clampFloor(by, 0, height - 1);
     rectW = maxOf(1, round(bw));
@@ -477,8 +781,29 @@ function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
     run("Select None");
 }
 
+
+function drawSelectedObjectOverlay(id, bx, by, bw, bh) {
+    requireWindow("SelectedObjectsOverlay");
+    rectX = clampFloor(bx, 0, width - 1);
+    rectY = clampFloor(by, 0, height - 1);
+    rectW = maxOf(1, round(bw));
+    rectH = maxOf(1, round(bh));
+    if (rectX + rectW > width) rectW = width - rectX;
+    if (rectY + rectH > height) rectH = height - rectY;
+    makeRectangle(rectX, rectY, rectW, rectH);
+    setLineWidth(contourWidth + 1);
+    setForegroundColor(0,255,255);
+    run("Draw", "slice");
+    if (labelObjects == 1) {
+        setFont("SansSerif", 20, "bold");
+        setColor(0,255,255);
+        drawString("#" + id, rectX, maxOf(24, rectY-8));
+    }
+    run("Select None");
+}
+
 function saveReviewPreviewImage() {
-    selectWindow("Review_Detection_Overlay");
+    requireWindow("ReviewDetectionOverlay");
     run("Duplicate...", "title=Review_Overlay_Preview");
     needsResize = 0;
     if (previewMaxSize > 0) {
@@ -499,38 +824,81 @@ function saveReviewPreviewImage() {
     close();
 }
 
-function classifyObject(area, aspect, touchesBorder) {
+function outputObjectType(classification) {
+    if (classification == "single_cell_candidate") return "single_cell";
+    if (classification == "aggregate_candidate") return "aggregate";
+    if (classification == "cell_region_candidate") return "cell_region";
+    return classification;
+}
+
+function classifyObject(area, aspect, touchesBorder, fillRatio) {
     if (excludeBorderObjects == 1) {
         if (touchesBorder == 1) return "border_object";
     }
-    if (area < particleExtractMinArea) return "too_small_noise";
-    if (area < minNoiseArea) return "too_small_noise";
-    if (area < minSingleCellArea) return "small_cell_or_fragment";
-    if (area > maxAggregateArea) return "too_large_artifact";
+    if (area < particleExtractMinArea) return "too_small";
+    if (area < minNoiseArea) return "too_small";
+    if (area < minSingleCellArea) return "too_small";
+    if (fillRatio < 0.12) return "rectangle_or_line_artifact";
+    if (area > maxAggregateArea) return "background_texture";
     if (area <= maxSingleCellArea) {
-        if (aspect > maxSingleCellAspect) return "too_long_artifact";
+        if (aspect > maxSingleCellAspect) return "rectangle_or_line_artifact";
+        if (area < 500) return "cell_region_candidate";
         return "single_cell_candidate";
     }
     if (area >= minAggregateArea) {
         if (area <= maxAggregateArea) {
-            if (aspect > maxAggregateAspect) return "too_long_artifact";
+            if (aspect > maxAggregateAspect) return "rectangle_or_line_artifact";
             return "aggregate_candidate";
         }
     }
-    return "small_cell_or_fragment";
+    return "uncertain_or_artifact";
 }
 
 function rejectReasonFor(classification, area) {
     if (isAcceptedClass(classification) == 1) return "";
-    if (classification == "too_small_noise") {
-        if (area < particleExtractMinArea) return "below_particle_extract_min_area";
-    }
-    return classification;
+    if (classification == "too_small") return "reject_too_small";
+    if (classification == "border_object") return "reject_border_artifact";
+    if (classification == "rectangle_or_line_artifact") return "reject_line_or_frame_artifact";
+    if (classification == "too_large_artifact") return "reject_large_rectangular_artifact";
+    return "reject_" + classification;
+}
+
+function biologicallyPlausibleFullBlue(objectPixels, bw, bh, aspect, fillRatio, grayStd) {
+    longSide = maxOf(bw, bh);
+    shortSide = maxOf(1, minOf(bw, bh));
+    if (objectPixels <= maxSingleCellArea && aspect <= maxSingleCellAspect && fillRatio >= 0.18 && fillRatio <= 0.82) return 1;
+    if (objectPixels <= 2 * maxSingleCellArea && aspect <= maxAggregateAspect && fillRatio >= 0.18 && fillRatio <= 0.70 && shortSide >= 8) return 1;
+    return 0;
+}
+
+function postFilterRejectReason(objectPixels, roiAreaPixels, bw, bh, aspect, fillRatio, touchesBorder, fraction) {
+    bboxArea = maxOf(1, bw * bh);
+    objectFill = objectPixels / maxOf(1, roiAreaPixels);
+    longSide = maxOf(bw, bh);
+    shortSide = maxOf(1, minOf(bw, bh));
+    if (touchesBorder == 1) return "reject_border_artifact";
+    if (objectPixels < minSingleCellArea) return "reject_too_small";
+    if (aspect > maxAggregateAspect) return "reject_line_or_frame_artifact";
+    if (longSide > 0.40 * maxOf(width, height) && shortSide < 0.08 * minOf(width, height)) return "reject_line_or_frame_artifact";
+    if (objectPixels > maxSingleCellArea && objectFill > 0.82 && fraction > 0.98) return "reject_large_full_blue_artifact";
+    if (objectPixels > maxSingleCellArea && objectFill > 0.88 && aspect < 1.35 && fraction > 0.90) return "reject_large_rectangular_artifact";
+    if (bboxArea > 0.015 * framePixels && objectFill > 0.75 && fraction > 0.95) return "reject_large_full_blue_artifact";
+    return "";
+}
+
+function sanitizeId(value) {
+    clean = replace(value, ",", "_");
+    clean = replace(clean, " ", "_");
+    clean = replace(clean, "\\", "_");
+    clean = replace(clean, "/", "_");
+    clean = replace(clean, ".", "_");
+    return clean;
 }
 
 function isAcceptedClass(classification) {
     if (classification == "single_cell_candidate") return 1;
     if (classification == "aggregate_candidate") return 1;
+    if (classification == "cell_region_candidate") return 1;
     return 0;
 }
 
@@ -564,7 +932,7 @@ function whiteCount(title) {
 }
 
 function savePreviewImage() {
-    selectWindow("Overlay_Combined");
+    requireWindow("RoiOverlay");
     run("Duplicate...", "title=Overlay_Preview");
     needsResize = 0;
     if (previewMaxSize > 0) {
@@ -610,17 +978,209 @@ function writeQcReport(qcStatus) {
     report += "- min_stable_accepted_pixels: " + minStableAcceptedPixels + "\n\n";
     if (qcStatus != "PASS") {
         report += "## Warnings\n\n";
+        if (wekaFailureStatus != "") report += "- " + wekaFailureStatus + ": Weka tile inference did not produce a usable stitched cell-material mask.\n";
+        if (acceptedCount == 0) {
+            report += "- FAIL_NO_ACCEPTED_OBJECTS: Stage 1A detector found no accepted biological ROI/cell-material regions.\n";
+            if (borderCount > 0) report += "- Only rejected border/annotation artifact candidates were detected in this run; they are not reported as biological ROIs.\n";
+            report += "- Stage 1B supervised detector investigation is required before biological interpretation of this frame.\n";
+        }
         if (acceptedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_ACCEPTED_OBJECT_COUNT: fewer accepted objects than the minimum expected count.\n";
+        if (selectedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_SELECTED_FRAME_OBJECT_COUNT: fewer selected frame-summary objects than the minimum expected count.\n";
         if (roiWarningCount > 0) report += "- WARN_ROI_RECONSTRUCTION: one or more objects had ROI reconstruction warnings and were excluded from final accepted summary.\n";
+        if (selectedNearFullBlueCount > 0) report += "- WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE: selected frame-summary objects still include near-full-blue candidates; review selected overlays/contact sheets before biological interpretation.\n";
         if (lowAcceptedAreaWarning == 1) report += "- WARN_LOW_ACCEPTED_AREA: accepted object count or accepted object pixels are low; frame-level blue percent can be unstable and should be interpreted cautiously.\n";
         report += "\n";
     }
     report += "## Notes\n\n";
     report += "The measured feature is preliminary relative optical blue_pixel_fraction, not a calibrated concentration measurement.\n";
     report += "Bounding boxes are loop limits only; pixel membership is checked through selectionContains(x,y).\n";
+    report += "Weka is treated as a cell-material candidate generator; blue pixels are measured only inside accepted cell-material regions and near-full-blue candidates are penalized unless size/shape context is plausible.\n";
+    if (indexOf(qcStatus, "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE") >= 0 || indexOf(qcStatus, "WARN_MANY_FULL_BLUE_OBJECTS") >= 0 || indexOf(qcStatus, "WARN_HIGH_ACCEPTED_OBJECT_COUNT") >= 0) {
+        report += "Biological interpretation requires reviewer validation using selection_review_candidates_<image_stem>.csv and review_candidates_contact_sheet_<image_stem>.jpg before batch analysis.\n";
+        report += "Suggested review_label values: include_cell_material, include_aggregate, exclude_blue_background, exclude_full_blue_artifact, exclude_border_or_metadata, exclude_noise, uncertain.\n";
+    }
+    if (acceptedCount == 0) report += "This run is a detector/QC failure, not a successful biological Stage 1A result; use the generated files only for debugging and Stage 1B detector planning.\n";
     File.saveString(report, outputDir + "/extended_qc_report.md");
 }
 
+
+function createReferenceRoiInnerMask(manifestPath) {
+    statusPath = outputDir + "/reference_roi_inner_mask_status.txt";
+    script = "";
+    script += "var IJ = Packages.ij.IJ;\n";
+    script += "var FileWriter = Packages.java.io.FileWriter;\n";
+    script += "var Files = Packages.java.nio.file.Files;\n";
+    script += "var Paths = Packages.java.nio.file.Paths;\n";
+    script += "var ByteProcessor = Packages.ij.process.ByteProcessor;\n";
+    script += "var ImagePlus = Packages.ij.ImagePlus;\n";
+    script += "try {\n";
+    script += "  var w = " + width + "; var h = " + height + "; var bp = new ByteProcessor(w, h); var count = 0;\n";
+    script += "  var lines = String(new java.lang.String(Files.readAllBytes(Paths.get('" + jsPath(manifestPath) + "')), 'UTF-8')).replace(/^\\uFEFF/, '').split(/\\r?\\n/);\n";
+    script += "  if (lines.length > 0) { var header = String(lines[0]).split(','); var ix=-1, iy=-1, iw=-1, ih=-1;\n";
+    script += "    for (var hi=0; hi<header.length; hi++) { var hn=String(header[hi]).replace(/^\\uFEFF/, ''); if (hn=='roi_inner_x') ix=hi; if (hn=='roi_inner_y') iy=hi; if (hn=='roi_inner_w') iw=hi; if (hn=='roi_inner_h') ih=hi; }\n";
+    script += "    for (var li=1; li<lines.length; li++) { var line=String(lines[li]); if (line.trim()=='' || ix<0 || iy<0 || iw<0 || ih<0) continue; var parts=line.split(',');\n";
+    script += "      var rx=Math.floor(parseFloat(parts[ix])); var ry=Math.floor(parseFloat(parts[iy])); var rw=Math.floor(parseFloat(parts[iw])); var rh=Math.floor(parseFloat(parts[ih]));\n";
+    script += "      var x0=Math.max(0, rx); var y0=Math.max(0, ry); var x1=Math.min(w, rx+rw); var y1=Math.min(h, ry+rh);\n";
+    script += "      if (x1 <= x0 || y1 <= y0) continue; count++;\n";
+    script += "      for (var yy=y0; yy<y1; yy++) for (var xx=x0; xx<x1; xx++) bp.set(xx, yy, 255);\n";
+    script += "    }\n";
+    script += "  }\n";
+    script += "  var mask = new ImagePlus('ReferenceRoiInnerMask', bp); mask.show(); var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write(String(count)); fw.close();\n";
+    script += "} catch (e) { var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('FAIL\\n' + e); fw.close(); }\n";
+    eval("script", script);
+    status = File.openAsString(statusPath);
+    if (startsWith(status, "FAIL")) exit("FAIL_REFERENCE_ROI_MANIFEST_READ: " + status);
+    return parseFloat(status);
+}
+
+
+function runWekaPrediction(modelPath) {
+    statusPath = outputDir + "/weka_status.txt";
+    classMapPath = outputDir + "/debug_weka_class_map.tif";
+    probabilityPath = outputDir + "/debug_weka_probability_map.tif";
+    tileMaskPath = outputDir + "/debug_weka_tile_mask_raw.tif";
+    script = "";
+    script += "var IJ = Packages.ij.IJ;\n";
+    script += "var WM = Packages.ij.WindowManager;\n";
+    script += "var FileWriter = Packages.java.io.FileWriter;\n";
+    script += "function ck(name) { var fw = new FileWriter('" + jsPath(logPath) + "', true); fw.write('CHECKPOINT ' + name + '\\n'); fw.close(); }\n";
+    script += "try {\n";
+    script += "  var WekaSegmentation = Packages.trainableSegmentation.WekaSegmentation;\n";
+    script += "  var Roi = Packages.ij.gui.Roi;\n";
+    script += "  var Duplicator = Packages.ij.plugin.Duplicator;\n";
+    script += "  var ByteProcessor = Packages.ij.process.ByteProcessor;\n";
+    script += "  var ImagePlus = Packages.ij.ImagePlus;\n";
+    script += "  var Integer = Packages.java.lang.Integer;\n";
+    script += "  var Files = Packages.java.nio.file.Files;\n";
+    script += "  var Paths = Packages.java.nio.file.Paths;\n";
+    script += "  var imp = WM.getImage('Original_RGB');\n";
+    script += "  var w = imp.getWidth(); var h = imp.getHeight();\n";
+    script += "  var tileSize = " + d2s(wekaTileSize, 0) + "; var overlap = " + d2s(wekaTileOverlap, 0) + ";\n";
+    script += "  if (tileSize < 128) tileSize = 128;\n";
+    script += "  if (overlap < 0) overlap = 0;\n";
+    script += "  if (overlap * 2 >= tileSize) overlap = Math.floor(tileSize / 4);\n";
+    script += "  var step = tileSize - 2 * overlap; if (step < 64) step = tileSize;\n";
+    script += "  var full = new ByteProcessor(w, h);\n";
+    script += "  var rois = [];\n";
+    script += "  var manifestPath = '" + jsPath(referenceRoiManifestPath) + "';\n";
+    script += "  var referenceOnly = " + d2s(referenceRoiOnly, 0) + ";\n";
+    script += "  if (manifestPath != '') {\n";
+    script += "    var lines = String(new java.lang.String(Files.readAllBytes(Paths.get(manifestPath)), 'UTF-8')).replace(/^\\uFEFF/, '').split(/\\r?\\n/);\n";
+    script += "    if (lines.length > 0) { var header = String(lines[0]).split(','); var ix=-1, iy=-1, iw=-1, ih=-1;\n";
+    script += "      for (var hi=0; hi<header.length; hi++) { var hn=String(header[hi]).replace(/^\\uFEFF/, ''); if (hn=='roi_inner_x') ix=hi; if (hn=='roi_inner_y') iy=hi; if (hn=='roi_inner_w') iw=hi; if (hn=='roi_inner_h') ih=hi; }\n";
+    script += "      for (var li=1; li<lines.length; li++) { var line=String(lines[li]); if (line.trim()=='' || ix<0 || iy<0 || iw<0 || ih<0) continue; var parts=line.split(',');\n";
+    script += "        var rx=Math.floor(parseFloat(parts[ix])); var ry=Math.floor(parseFloat(parts[iy])); var rw=Math.floor(parseFloat(parts[iw])); var rh=Math.floor(parseFloat(parts[ih]));\n";
+    script += "        if (rw > 0 && rh > 0) rois.push([Math.max(0, rx), Math.max(0, ry), Math.min(rw, w-rx), Math.min(rh, h-ry)]);\n";
+    script += "      }\n";
+    script += "    }\n";
+    script += "  }\n";
+    script += "  if (referenceOnly == 1 && rois.length == 0) throw 'FAIL_REFERENCE_ROI_NOT_FOUND';\n";
+    script += "  if (rois.length == 0) rois.push([0, 0, w, h]);\n";
+    script += "  var savedFirstProbability = false; var tileCount = 0;\n";
+    script += "  ck('before_first_weka_tile');\n";
+    script += "  for (var ri = 0; ri < rois.length; ri++) { var roi = rois[ri]; var rx0 = roi[0]; var ry0 = roi[1]; var rw0 = roi[2]; var rh0 = roi[3]; ck('before_weka_roi_' + (ri+1));\n";
+    script += "  for (var y = ry0; y < ry0 + rh0; y += step) {\n";
+    script += "    for (var x = rx0; x < rx0 + rw0; x += step) {\n";
+    script += "      var tw = Math.floor(Math.min(tileSize, rx0 + rw0 - x)); var th = Math.floor(Math.min(tileSize, ry0 + rh0 - y));\n";
+    script += "      var xi = Integer.valueOf(String(Math.floor(x))); var yi = Integer.valueOf(String(Math.floor(y)));\n";
+    script += "      var twi = Integer.valueOf(String(tw)); var thi = Integer.valueOf(String(th));\n";
+    script += "      if (twi.intValue() <= 0 || thi.intValue() <= 0) continue;\n";
+    script += "      imp.setRoi(new Roi(xi, yi, twi, thi));\n";
+    script += "      if (tileCount == 0) ck('after_create_weka_tile_roi_1');\n";
+    script += "      var tile = new Duplicator().run(imp);\n";
+    script += "      var segmentator = new WekaSegmentation(tile);\n";
+    script += "      segmentator.loadClassifier('" + jsPath(modelPath) + "');\n";
+    script += "      var probability = segmentator.applyClassifier(tile, 0, true);\n";
+    script += "      if (!savedFirstProbability) { probability.setTitle('WekaProbabilityTile0'); IJ.saveAs(probability, 'Tiff', '" + jsPath(probabilityPath) + "'); savedFirstProbability = true; }\n";
+    script += "      probability.setSlice(1);\n";
+    script += "      var proc = probability.getProcessor();\n";
+    script += "      var threshold = (probability.getBitDepth() == 32) ? 0.5 : 128;\n";
+    script += "      var left = (x == rx0) ? 0 : overlap; var top = (y == ry0) ? 0 : overlap;\n";
+    script += "      var right = (x + tw >= rx0 + rw0) ? 0 : overlap; var bottom = (y + th >= ry0 + rh0) ? 0 : overlap;\n";
+    script += "      for (var yy = top; yy < th - bottom; yy++) {\n";
+    script += "        for (var xx = left; xx < tw - right; xx++) {\n";
+    script += "          if (proc.getf(xx, yy) >= threshold) full.set(x + xx, y + yy, 255);\n";
+    script += "        }\n";
+    script += "      }\n";
+    script += "      tileCount++; if (tileCount % 10 == 0) ck('after_weka_tile_' + tileCount);\n";
+    script += "      tile.close(); probability.close();\n";
+    script += "    }\n";
+    script += "  }\n";
+    script += "  }\n";
+    script += "  ck('after_weka_tile_count_' + tileCount);\n";
+    script += "  imp.killRoi();\n";
+    script += "  ck('after_weka_stitching');\n";
+    script += "  var mask = new ImagePlus('WekaCellMaskRaw', full);\n";
+    script += "  mask.show();\n";
+    script += "  ck('after_create_WekaCellMaskRaw');\n";
+    script += "  IJ.saveAs(mask, 'Tiff', '" + jsPath(tileMaskPath) + "');\n";
+    script += "  IJ.saveAs(mask, 'Tiff', '" + jsPath(classMapPath) + "');\n";
+    script += "  var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('OK'); fw.close();\n";
+    script += "} catch (e) { var msg = String(e); var code = (msg.indexOf('ClassNotFound') >= 0 || msg.indexOf('NoClassDefFound') >= 0 || msg.indexOf('trainableSegmentation') >= 0) ? 'FAIL_WEKA_PLUGIN_UNAVAILABLE' : 'FAIL_WEKA_TILE_INFERENCE'; var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write(code + '\\n' + e); fw.close(); }\n";
+    eval("script", script);
+    status = File.openAsString(statusPath);
+    if (startsWith(status, "OK")) return "";
+    if (startsWith(status, "FAIL_WEKA_TILE_INFERENCE")) return "FAIL_WEKA_TILE_INFERENCE";
+    return "FAIL_WEKA_PLUGIN_UNAVAILABLE";
+}
+
+function ensureWekaCellMaskWindow() {
+    if (windowExists("WekaCellMaskRaw")) {
+        selectWindow("WekaCellMaskRaw");
+        if (getWidth() != width || getHeight() != height) {
+            logLine("FAIL_WEKA_MASK_MISSING: WekaCellMaskRaw dimensions do not match the original image.");
+            return "FAIL_WEKA_MASK_MISSING";
+        }
+        checkpoint("after_create_WekaCellMaskRaw");
+        return "";
+    }
+    tileMaskPath = outputDir + "/debug_weka_tile_mask_raw.tif";
+    if (File.exists(tileMaskPath)) {
+        checkpoint("before_open_stitched_weka_mask");
+        open(tileMaskPath);
+        rename("WekaCellMaskRaw");
+        if (getWidth() != width || getHeight() != height) {
+            logLine("FAIL_WEKA_MASK_MISSING: restored stitched Weka mask dimensions do not match the original image.");
+            return "FAIL_WEKA_MASK_MISSING";
+        }
+        checkpoint("after_create_WekaCellMaskRaw");
+        return "";
+    }
+    logLine("FAIL_WEKA_MASK_MISSING: Weka status was OK, but no WekaCellMaskRaw window or stitched mask file was found.");
+    return "FAIL_WEKA_MASK_MISSING";
+}
+
+function jsPath(pathValue) {
+    fixed = replace(pathValue, "\\", "/");
+    fixed = replace(fixed, "'", "\\'");
+    return fixed;
+}
+
+function saveDebugImage(title, fileName) {
+    requireWindow(title);
+    run("Select None");
+    run("Duplicate...", "title=DebugSaveWindow");
+    requireWindow("DebugSaveWindow");
+    saveAs("Tiff", outputDir + "/" + fileName);
+    close();
+}
+
+function windowExists(title) {
+    titles = getList("image.titles");
+    for (wi = 0; wi < titles.length; wi++) {
+        if (titles[wi] == title) return 1;
+    }
+    return 0;
+}
+
+function requireWindow(title) {
+    if (windowExists(title) == 0) {
+        message = "ERROR required ImageJ window missing: " + title;
+        logLine(message);
+        exit(message);
+    }
+    selectWindow(title);
+}
 
 function appendQcStatus(currentStatus, warningStatus) {
     if (currentStatus == "PASS") return warningStatus;
