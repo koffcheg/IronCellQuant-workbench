@@ -1182,7 +1182,7 @@ def evaluate_dark_reference_roi_bbox(image: Any, x: int, y: int, w: int, h: int)
     right = min(image.width, x + w)
     bottom = min(image.height, y + h)
     if right - left < 120 or bottom - top < 120:
-        return {"accepted": False, "reason": "bbox_too_small_for_reference_border", "score": 0.0, **default_reference_roi_audit_metrics()}
+        return {"accepted": False, "reason": "reject_invalid_clipped_geometry", "score": 0.0, **default_reference_roi_audit_metrics()}
     thickness = max(5, min(20, round(min(right - left, bottom - top) * 0.04)))
     strips = {
         "top": image.crop((left, top, right, min(bottom, top + thickness))),
@@ -1240,10 +1240,12 @@ def evaluate_dark_reference_roi_bbox(image: Any, x: int, y: int, w: int, h: int)
             if is_dark_annotation_pixel(interior_pixels[xx, yy]):
                 interior_dark += 1
     interior_dark_ratio = interior_dark / max(1, interior_total)
-    failing_sides = [
+    passing_sides = [
         side for side, values in side_metrics.items()
-        if values["dark_ratio"] < 0.24 or values["continuity"] < 0.58 or values["longest_run_fraction"] < 0.35
+        if values["dark_ratio"] >= 0.24 and values["continuity"] >= 0.58 and values["longest_run_fraction"] >= 0.35
     ]
+    failing_sides = [side for side in side_metrics if side not in passing_sides]
+    touches_image_edge = left <= 2 or top <= 2 or right >= image.width - 2 or bottom >= image.height - 2
     score = sum(values["dark_ratio"] + values["continuity"] + values["longest_run_fraction"] for values in side_metrics.values()) - interior_dark_ratio
     result: dict[str, Any] = {
         "accepted": False,
@@ -1253,12 +1255,14 @@ def evaluate_dark_reference_roi_bbox(image: Any, x: int, y: int, w: int, h: int)
         "interior_dark_ratio": interior_dark_ratio,
         "detected_bbox": (left, top, right - left, bottom - top),
     }
-    if failing_sides:
-        result["reason"] = "border_not_continuously_dark_on_all_sides:" + ",".join(failing_sides)
-        return result
     if interior_dark_ratio >= 0.35:
-        result["reason"] = "interior_mostly_dark_not_reference_roi"
+        result["reason"] = "reject_not_manual_reference_box"
         return result
+    if failing_sides and not (touches_image_edge and len(passing_sides) >= 2):
+        result["reason"] = "reject_not_manual_reference_box"
+        return result
+    if failing_sides:
+        result["reason"] = "validated_clipped_manual_reference_border"
     result["accepted"] = True
     return result
 
@@ -1294,7 +1298,7 @@ def search_dark_reference_roi_border(original_image: Path, x: int, y: int, w: in
     from PIL import Image
 
     if w < 120 or h < 120:
-        return {"accepted": False, "reason": "bbox_too_small_for_reference_border", "score": 0.0, **default_reference_roi_audit_metrics()}
+        return {"accepted": False, "reason": "reject_invalid_clipped_geometry", "score": 0.0, **default_reference_roi_audit_metrics()}
     with Image.open(original_image) as source:
         image = source.convert("RGB")
         tolerance = max(12, min(72, round(min(w, h) * 0.18)))
@@ -1498,16 +1502,22 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
             continue
         detected_x, detected_y, detected_w, detected_h = border_result.get("detected_bbox", (x, y, w, h))
         detected_bbox = (detected_x, detected_y, detected_w, detected_h)
+        margin = max(4, min(28, round(min(detected_w, detected_h) * 0.04)))
+        inner_x = detected_x + margin
+        inner_y = detected_y + margin
+        inner_w = detected_w - 2 * margin
+        inner_h = detected_h - 2 * margin
+        if inner_w <= 0 or inner_h <= 0:
+            audit_row["accepted_as_reference_roi"] = "false"
+            audit_row["reject_reason"] = "reject_zero_inner_area"
+            continue
         if any(reference_candidate_overlap_fraction(detected_bbox, existing_bbox) >= 0.70 for existing_bbox in accepted_bboxes):
+            audit_row["accepted_as_reference_roi"] = "false"
+            audit_row["reject_reason"] = "reject_duplicate_reference_roi"
             continue
         accepted_bboxes.append(detected_bbox)
         if candidate.get("candidate_origin") == "rejected_object":
             accepted_rejected_candidate_count += 1
-        margin = max(8, min(28, round(min(detected_w, detected_h) * 0.04)))
-        inner_x = detected_x + margin
-        inner_y = detected_y + margin
-        inner_w = max(1, detected_w - 2 * margin)
-        inner_h = max(1, detected_h - 2 * margin)
         reference_roi_id = f"{frame_id}_reference_roi_{len(regions) + 1}"
         measurement = measure_reference_roi_pixels(original_image, inner_x, inner_y, inner_w, inner_h, params)
         review_note_prefix = "reference_roi_region_from_image_dark_rectangle_scan"
