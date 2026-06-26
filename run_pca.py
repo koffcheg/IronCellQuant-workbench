@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from pca_analysis.config import load_config, validate_config
+from pca_analysis.config import artifact_name, load_config, validate_config
 from pca_analysis.analysis import run_pca_analysis
 from pca_analysis.data_io import ensure_output_dir
 from pca_analysis.preprocessing import preprocess_features
@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, help="Path to FeatureMatrix CSV.")
     parser.add_argument("--output", required=True, help="Output directory for reports and standardized features.")
     parser.add_argument("--config", help="Optional JSON config path.")
+    parser.add_argument("--mode", choices=["cells", "frames"], help="Explicit censored matrix PCA mode.")
     return parser
 
 
@@ -28,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config(args.config)
+        if args.mode:
+            config.mode = args.mode
         config_errors = validate_config(config)
         if config_errors:
             print("Configuration error:", file=sys.stderr)
@@ -40,12 +43,14 @@ def main(argv: list[str] | None = None) -> int:
 
     validation_result = validate_input(Path(args.input), output_dir, config)
     if not validation_result.can_continue or validation_result.dataframe is None:
-        print(f"Validation failed. See: {output_dir / 'Data_Check_Report.txt'}", file=sys.stderr)
+        report_name = artifact_name(config, "Data_Check_Report", ".txt")
+        print(f"Validation failed. See: {output_dir / report_name}", file=sys.stderr)
         return 1
 
     preprocessing_result = preprocess_features(validation_result.dataframe, output_dir, config)
     if not preprocessing_result.succeeded:
-        print(f"Preprocessing failed. See: {output_dir / 'Feature_Preprocessing_Report.txt'}", file=sys.stderr)
+        report_name = artifact_name(config, "Feature_Preprocessing_Report", ".txt")
+        print(f"Preprocessing failed. See: {output_dir / report_name}", file=sys.stderr)
         return 1
 
     analysis_result = run_pca_analysis(

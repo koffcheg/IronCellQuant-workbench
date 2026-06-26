@@ -44,10 +44,33 @@ class PCAConfig:
     exclude_columns: list[str] | None = None
     include_columns: list[str] | None = None
     exclude_target_from_pca: bool = False
+    mode: str | None = None
 
     def __post_init__(self) -> None:
         if self.service_columns is None:
-            self.service_columns = ["image_name", "object_type", "object_id"]
+            self.service_columns = [
+                "image_name",
+                "frame_id",
+                "object_id",
+                "feature_row_id",
+                "display_label",
+                "object_type",
+                "bbox_x",
+                "bbox_y",
+                "bbox_w",
+                "bbox_h",
+                "bbox_width",
+                "bbox_height",
+                "reference_roi_id",
+                "inside_reference_roi",
+                "reference_roi_overlap_fraction",
+                "censoring_status",
+                "censoring_reason",
+                "failed_stage",
+                "last_passed_stage",
+                "stage_trace",
+                "selected_for_censored_frame",
+            ]
         if self.exclude_columns is None:
             self.exclude_columns = []
 
@@ -128,6 +151,8 @@ def validate_config(config: PCAConfig) -> list[str]:
         _validate_string_list("allowed_object_types", config.allowed_object_types, errors, non_empty=False)
     if config.delivery_export_dir is not None and not isinstance(config.delivery_export_dir, str):
         errors.append("delivery_export_dir must be a string or null.")
+    if config.mode is not None and config.mode not in {"cells", "frames"}:
+        errors.append("mode must be one of: cells, frames, or null.")
 
     _validate_bool("exclude_target_from_pca", config.exclude_target_from_pca, errors)
     _validate_bool("standardization_enabled", config.standardization_enabled, errors)
@@ -142,6 +167,16 @@ def validate_config(config: PCAConfig) -> list[str]:
             errors.append(f"{name} must be a string or null.")
 
     return errors
+
+
+def mode_suffix(config: PCAConfig) -> str:
+    """Return artifact suffix for explicit censored-matrix PCA modes."""
+    return f"_{config.mode}" if config.mode else ""
+
+
+def artifact_name(config: PCAConfig, stem: str, extension: str) -> str:
+    """Build a mode-aware artifact filename."""
+    return f"{stem}{mode_suffix(config)}{extension}"
 
 
 def _validate_non_negative_int(name: str, value: Any, errors: list[str]) -> None:

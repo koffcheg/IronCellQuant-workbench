@@ -8,8 +8,18 @@ from pathlib import Path
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-from .config import PCAConfig
+from .config import PCAConfig, artifact_name
 from .data_io import write_text_report
+
+
+AUDIT_STATUS_COLUMN_TOKENS = (
+    "audit",
+    "status",
+    "stage",
+    "trace",
+    "reason",
+    "rank",
+)
 
 
 @dataclass
@@ -22,6 +32,8 @@ class PreprocessingResult:
     raw_numeric_feature_columns: list[str] = field(default_factory=list)
     non_numeric_excluded_columns: list[str] = field(default_factory=list)
     excluded_columns: list[str] = field(default_factory=list)
+    excluded_service_columns: list[str] = field(default_factory=list)
+    excluded_audit_status_columns: list[str] = field(default_factory=list)
     removed_features_reasons: dict[str, str] = field(default_factory=dict)
     invalid_numeric_counts: dict[str, int] = field(default_factory=dict)
     missing_numeric_counts: dict[str, int] = field(default_factory=dict)
@@ -41,18 +53,23 @@ class PreprocessingResult:
 def preprocess_features(dataframe: pd.DataFrame, output_dir: str | Path, config: PCAConfig) -> PreprocessingResult:
     result = PreprocessingResult()
     output_path = Path(output_dir)
-    service_columns = config.service_columns or []
-
-    missing_service_columns = [column for column in service_columns if column not in dataframe.columns]
-    if missing_service_columns:
-        result.errors.append(f"Missing service column(s) during preprocessing: {', '.join(missing_service_columns)}")
-        write_preprocessing_report(output_path, result, config)
-        return result
+    configured_service_columns = config.service_columns or []
+    service_columns = [column for column in configured_service_columns if column in dataframe.columns]
 
     explicit_excluded = set(config.exclude_columns or [])
-    excluded = set(service_columns) | explicit_excluded
+    automatic_excluded = _automatic_excluded_columns(dataframe.columns, configured_service_columns)
+    excluded = automatic_excluded | explicit_excluded
+    result.excluded_service_columns = [
+        column for column in dataframe.columns if column in excluded and not _is_audit_status_column(column)
+    ]
+    result.excluded_audit_status_columns = [
+        column for column in dataframe.columns if column in excluded and _is_audit_status_column(column)
+    ]
     for column in sorted(excluded):
-        result.removed_features_reasons[column] = "service/excluded column"
+        if _is_audit_status_column(column):
+            result.removed_features_reasons[column] = "audit/status/selection column"
+        else:
+            result.removed_features_reasons[column] = "service/ROI/bbox/id column"
 
     if config.include_columns is not None:
         missing_include_columns = [column for column in config.include_columns if column not in dataframe.columns]
@@ -87,7 +104,8 @@ def preprocess_features(dataframe: pd.DataFrame, output_dir: str | Path, config:
     pca_feature_columns = [column for column in pca_candidate_columns if column in numeric_candidate_columns]
     result.feature_columns_before = pca_feature_columns.copy()
     result.raw_numeric_feature_columns = numeric_candidate_columns.copy()
-    result.excluded_columns = sorted(excluded) + result.non_numeric_excluded_columns.copy()
+    result.excluded_columns = sorted(column for column in excluded if column in dataframe.columns)
+    result.excluded_columns += result.non_numeric_excluded_columns.copy()
 
     features = raw_numeric_data[pca_feature_columns].copy()
     identifiers = dataframe[service_columns].copy()
@@ -171,9 +189,30 @@ def preprocess_features(dataframe: pd.DataFrame, output_dir: str | Path, config:
         axis=1,
     )
     result.standardized_features = standardized_features
-    standardized_features.to_csv(output_path / "Standardized_Features.csv", index=False)
+    standardized_features.to_csv(output_path / artifact_name(config, "Standardized_Features", ".csv"), index=False)
     write_preprocessing_report(output_path, result, config)
     return result
+
+
+def _automatic_excluded_columns(columns: pd.Index, configured_service_columns: list[str]) -> set[str]:
+    excluded = set(configured_service_columns)
+    for column in columns:
+        lowered = column.lower()
+        if _is_id_column(lowered) or "bbox" in lowered or "roi" in lowered or _is_audit_status_column(lowered):
+            excluded.add(column)
+    return excluded
+
+
+def _is_id_column(column: str) -> bool:
+    lowered = column.lower()
+    return lowered == "id" or lowered.endswith("_id") or "_id_" in lowered
+
+
+def _is_audit_status_column(column: str) -> bool:
+    lowered = column.lower()
+    if lowered.startswith("selection_") or lowered == "selected_for_censored_frame":
+        return True
+    return any(token in lowered for token in AUDIT_STATUS_COLUMN_TOKENS)
 
 
 def _coerce_numeric_candidates(
@@ -276,7 +315,21 @@ def write_preprocessing_report(output_dir: str | Path, result: PreprocessingResu
     lines.append("")
     lines.append(f"Conclusion: {'Preprocessing completed.' if result.succeeded else 'Preprocessing stopped.'}")
 
-    write_text_report(Path(output_dir) / "Feature_Preprocessing_Report.txt", "\n".join(lines) + "\n")
+    lines.insert(
+        13,
+        f"Excluded service/ROI/bbox/id columns ({len(result.excluded_service_columns)}): "
+        f"{', '.join(result.excluded_service_columns) or 'none'}",
+    )
+    lines.insert(
+        14,
+        f"Excluded audit/status/selection columns ({len(result.excluded_audit_status_columns)}): "
+        f"{', '.join(result.excluded_audit_status_columns) or 'none'}",
+    )
+
+    write_text_report(
+        Path(output_dir) / artifact_name(config, "Feature_Preprocessing_Report", ".txt"),
+        "\n".join(lines) + "\n",
+    )
 
 
 def _format_counts(counts: dict[str, int]) -> str:

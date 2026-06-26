@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from .config import PCAConfig
+from .config import PCAConfig, artifact_name
 from .data_io import write_text_report
 from .preprocessing import PreprocessingResult
 from .validation import ValidationResult
@@ -32,6 +32,7 @@ def write_pca_report(
         "PCA Report",
         "==========",
         f"Input file: {Path(input_path)}",
+        f"Mode: {config.mode or 'standard'}",
         f"Total objects analysed: {0 if result.scores is None else len(result.scores)}",
         f"Original columns count: {validation_result.column_count}",
         f"Numeric candidate columns: {len(preprocessing_result.raw_numeric_feature_columns)}",
@@ -39,6 +40,16 @@ def write_pca_report(
         f"Features after preprocessing: {len(preprocessing_result.feature_columns_after)}",
         f"Raw target status: {preprocessing_result.raw_target_status}",
         f"Raw color status: {preprocessing_result.raw_color_status}",
+        "",
+        f"Used numeric feature columns ({len(result.selected_features)}):",
+        _format_column_list(result.selected_features),
+        "",
+        f"Excluded service/ROI/bbox/id columns ({len(preprocessing_result.excluded_service_columns)}):",
+        _format_column_list(preprocessing_result.excluded_service_columns),
+        "",
+        f"Excluded audit/status/selection columns ({len(preprocessing_result.excluded_audit_status_columns)}):",
+        _format_column_list(preprocessing_result.excluded_audit_status_columns),
+        "",
         "Removed features and reasons:",
     ]
     if preprocessing_result.removed_features_reasons:
@@ -83,7 +94,7 @@ def write_pca_report(
             lines.append(f"{component}: {joined}")
 
     lines.append("")
-    lines.append(f"Features most correlated with {config.target_feature}:")
+    lines.append(f"Features most correlated with preliminary optical proxy {config.target_feature}:")
     if correlations.empty:
         lines.append("- none")
     else:
@@ -101,7 +112,8 @@ def write_pca_report(
         lines.append(f"Delivery filename mode: {delivery.get('filename_mode')}")
     lines.append("")
     lines.append("Generated files:")
-    generated_files = _unique_filenames(result.generated_files + ["PCA_Report.txt", "PCA_Run_Metadata.json"])
+    report_name = artifact_name(config, "PCA_Report", ".txt")
+    generated_files = _unique_filenames(result.generated_files + [report_name, "PCA_Run_Metadata.json"])
     lines.extend([f"- {filename}" for filename in generated_files] or ["- none"])
     lines.append("")
     lines.append("Warnings:")
@@ -109,13 +121,13 @@ def write_pca_report(
     lines.extend([f"- {warning}" for warning in all_warnings] or ["- none"])
     lines.append("")
     lines.append(
-        "Conclusion: Results describe statistical associations and candidate features only; "
-        "they are not evidence of actual iron concentration."
+        "Conclusion: Results describe statistical associations and preliminary blue-pixel optical proxy features only; "
+        "they are not chemical quantification of iron."
     )
 
-    write_text_report(output_dir / "PCA_Report.txt", "\n".join(lines) + "\n")
-    if "PCA_Report.txt" not in result.generated_files:
-        result.generated_files.append("PCA_Report.txt")
+    write_text_report(output_dir / report_name, "\n".join(lines) + "\n")
+    if report_name not in result.generated_files:
+        result.generated_files.append(report_name)
 
 
 def _unique_filenames(filenames: list[str]) -> list[str]:
@@ -127,3 +139,9 @@ def _unique_filenames(filenames: list[str]) -> list[str]:
         seen.add(filename)
         unique.append(filename)
     return unique
+
+
+def _format_column_list(columns: list[str]) -> str:
+    if not columns:
+        return "- none"
+    return "\n".join(f"- {column}" for column in columns)

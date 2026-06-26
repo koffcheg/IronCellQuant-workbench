@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import PCAConfig
+from .config import PCAConfig, artifact_name
 from .data_io import load_feature_matrix, read_csv_header, write_text_report
+from .preprocessing import _automatic_excluded_columns
 
 
 @dataclass
@@ -30,6 +31,8 @@ class ValidationResult:
     non_numeric_excluded_columns: list[str] = field(default_factory=list)
     invalid_numeric_counts: dict[str, int] = field(default_factory=dict)
     missing_numeric_counts: dict[str, int] = field(default_factory=dict)
+    excluded_service_columns: list[str] = field(default_factory=list)
+    excluded_audit_status_columns: list[str] = field(default_factory=list)
 
     @property
     def can_continue(self) -> bool:
@@ -42,23 +45,23 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
 
     if not path.exists():
         result.errors.append(f"Input file does not exist: {path}")
-        write_data_check_report(output_dir, result)
+        write_data_check_report(output_dir, result, config)
         return result
     if not path.is_file():
         result.errors.append(f"Input path is not a file: {path}")
-        write_data_check_report(output_dir, result)
+        write_data_check_report(output_dir, result, config)
         return result
 
     try:
         header = read_csv_header(path, config.delimiter)
     except Exception as exc:
         result.errors.append(f"Failed to read CSV header: {exc}")
-        write_data_check_report(output_dir, result)
+        write_data_check_report(output_dir, result, config)
         return result
 
     if not header:
         result.errors.append("CSV header is missing or empty.")
-        write_data_check_report(output_dir, result)
+        write_data_check_report(output_dir, result, config)
         return result
 
     result.field_count_errors, result.blank_line_count = _check_csv_field_counts(path, config.delimiter, len(header))
@@ -66,7 +69,7 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
         result.warnings.append(f"Blank CSV lines skipped: {result.blank_line_count}")
     if result.field_count_errors:
         result.errors.extend(result.field_count_errors)
-        write_data_check_report(output_dir, result)
+        write_data_check_report(output_dir, result, config)
         return result
 
     duplicates = sorted({name for name in header if header.count(name) > 1})
@@ -77,7 +80,7 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
         dataframe = load_feature_matrix(path, config.delimiter)
     except Exception as exc:
         result.errors.append(f"Failed to read CSV file: {exc}")
-        write_data_check_report(output_dir, result)
+        write_data_check_report(output_dir, result, config)
         return result
 
     result.dataframe = dataframe
@@ -87,9 +90,6 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
     if dataframe.empty:
         result.errors.append("CSV file is empty.")
 
-    missing_service_columns = [column for column in config.service_columns or [] if column not in dataframe.columns]
-    if missing_service_columns:
-        result.errors.append(f"Missing required service column(s): {', '.join(missing_service_columns)}")
     _check_object_type_compatibility(dataframe, config, result)
 
     result.missing_value_count = int(dataframe.isna().sum().sum())
@@ -100,7 +100,7 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
         column for column in result.numeric_columns if dataframe[column].nunique(dropna=True) <= 1
     ]
 
-    candidate_columns, pca_candidate_columns = _candidate_columns(dataframe, config, result.errors)
+    candidate_columns, pca_candidate_columns = _candidate_columns(dataframe, config, result)
     (
         result.numeric_candidate_columns,
         result.non_numeric_excluded_columns,
@@ -130,7 +130,7 @@ def validate_input(input_path: str | Path, output_dir: str | Path, config: PCACo
         )
         result.warnings.append(f"Invalid numeric value(s) detected in candidate column(s): {joined}")
 
-    write_data_check_report(output_dir, result)
+    write_data_check_report(output_dir, result, config)
     return result
 
 
@@ -156,15 +156,21 @@ def _check_csv_field_counts(path: Path, delimiter: str, expected_count: int) -> 
 def _candidate_columns(
     dataframe: pd.DataFrame,
     config: PCAConfig,
-    errors: list[str],
+    result: ValidationResult,
 ) -> tuple[list[str], list[str]]:
-    service_columns = set(config.service_columns or [])
-    excluded = service_columns | set(config.exclude_columns or [])
+    excluded = _automatic_excluded_columns(dataframe.columns, config.service_columns or [])
+    excluded |= set(config.exclude_columns or [])
+    result.excluded_service_columns = [
+        column for column in dataframe.columns if column in excluded and not _is_audit_status_column(column)
+    ]
+    result.excluded_audit_status_columns = [
+        column for column in dataframe.columns if column in excluded and _is_audit_status_column(column)
+    ]
 
     if config.include_columns is not None:
         missing_include_columns = [column for column in config.include_columns if column not in dataframe.columns]
         if missing_include_columns:
-            errors.append(f"include_columns contains missing column(s): {', '.join(missing_include_columns)}")
+            result.errors.append(f"include_columns contains missing column(s): {', '.join(missing_include_columns)}")
         candidate_columns = [
             column for column in config.include_columns if column in dataframe.columns and column not in excluded
         ]
@@ -177,11 +183,18 @@ def _candidate_columns(
     pca_candidate_columns = [column for column in candidate_columns if column not in pca_excluded]
 
     for extra_column in [config.target_feature, config.color_feature]:
-        if extra_column and extra_column in dataframe.columns and extra_column not in service_columns:
+        if extra_column and extra_column in dataframe.columns and extra_column not in excluded:
             if extra_column not in candidate_columns and extra_column not in set(config.exclude_columns or []):
                 candidate_columns.append(extra_column)
 
     return candidate_columns, pca_candidate_columns
+
+
+def _is_audit_status_column(column: str) -> bool:
+    lowered = column.lower()
+    if lowered.startswith("selection_") or lowered == "selected_for_censored_frame":
+        return True
+    return any(token in lowered for token in ("audit", "status", "stage", "trace", "reason", "rank"))
 
 
 def _check_object_type_compatibility(
@@ -248,7 +261,7 @@ def _non_empty_mask(series: pd.Series) -> pd.Series:
     return series.notna()
 
 
-def write_data_check_report(output_dir: str | Path, result: ValidationResult) -> None:
+def write_data_check_report(output_dir: str | Path, result: ValidationResult, config: PCAConfig) -> None:
     lines = [
         "Data Check Report",
         "=================",
@@ -264,6 +277,14 @@ def write_data_check_report(output_dir: str | Path, result: ValidationResult) ->
         (
             f"Non-numeric excluded candidate columns ({len(result.non_numeric_excluded_columns)}): "
             f"{', '.join(result.non_numeric_excluded_columns) or 'none'}"
+        ),
+        (
+            f"Excluded service/ROI/bbox/id columns ({len(result.excluded_service_columns)}): "
+            f"{', '.join(result.excluded_service_columns) or 'none'}"
+        ),
+        (
+            f"Excluded audit/status/selection columns ({len(result.excluded_audit_status_columns)}): "
+            f"{', '.join(result.excluded_audit_status_columns) or 'none'}"
         ),
         (
             "Invalid numeric values per candidate column: "
@@ -289,7 +310,10 @@ def write_data_check_report(output_dir: str | Path, result: ValidationResult) ->
     lines.append("")
     lines.append(f"Conclusion: {'PCA preprocessing can continue.' if result.can_continue else 'Critical errors found. Stop.'}")
 
-    write_text_report(Path(output_dir) / "Data_Check_Report.txt", "\n".join(lines) + "\n")
+    write_text_report(
+        Path(output_dir) / artifact_name(config, "Data_Check_Report", ".txt"),
+        "\n".join(lines) + "\n",
+    )
 
 
 def _format_counts(counts: dict[str, int]) -> str:

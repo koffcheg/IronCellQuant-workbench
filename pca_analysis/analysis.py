@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 
-from .config import PCAConfig
+from .config import PCAConfig, artifact_name
 from .model_io import write_pca_model, write_run_metadata
 from .preprocessing import PreprocessingResult
 from .reporting import write_pca_report
@@ -56,13 +56,7 @@ def run_pca_analysis(
         result.errors.append("Preprocessed feature matrix is missing.")
         return result
 
-    service_columns = config.service_columns or []
-    missing_service_columns = [column for column in service_columns if column not in preprocessed.columns]
-    if missing_service_columns:
-        result.errors.append(
-            f"Missing service column(s) in preprocessed matrix: {', '.join(missing_service_columns)}"
-        )
-        return result
+    service_columns = [column for column in config.service_columns or [] if column in preprocessed.columns]
 
     feature_columns = [column for column in preprocessing_result.feature_columns_after if column in preprocessed.columns]
     if not feature_columns:
@@ -151,11 +145,16 @@ def run_pca_analysis(
         config.min_explained_variance,
     )
 
-    _write_csv(output_path, "PCA_Summary.csv", summary, result)
-    _write_csv(output_path, "PCA_Scores.csv", scores, result)
-    _write_csv(output_path, "PCA_Loadings.csv", loadings, result)
-    _write_csv(output_path, "PCA_TopFeatures.csv", top_features, result)
-    _write_csv(output_path, "PCA_Correlation_With_BluePixel.csv", correlations, result)
+    _write_csv(output_path, artifact_name(config, "PCA_Summary", ".csv"), summary, result)
+    _write_csv(output_path, artifact_name(config, "PCA_Scores", ".csv"), scores, result)
+    _write_csv(output_path, artifact_name(config, "PCA_Loadings", ".csv"), loadings, result)
+    _write_csv(output_path, artifact_name(config, "PCA_TopFeatures", ".csv"), top_features, result)
+    _write_csv(
+        output_path,
+        artifact_name(config, "PCA_Correlation_With_BluePixel", ".csv"),
+        correlations,
+        result,
+    )
     result.generated_files.extend(
         write_pca_visualizations(
             output_path,
@@ -295,12 +294,12 @@ def _plan_delivery_export(
     delivery_dir = Path(config.delivery_export_dir) if config.delivery_export_dir else output_dir / "delivery_named_outputs"
     input_stem = Path(input_path).stem
     source_names = [
-        "PCA_Summary.csv",
-        "PCA_Loadings.csv",
-        "PCA_Scores.csv",
-        "PCA_TopFeatures.csv",
-        "PCA_Correlation_With_BluePixel.csv",
-        "PCA_Report.txt",
+        artifact_name(config, "PCA_Summary", ".csv"),
+        artifact_name(config, "PCA_Loadings", ".csv"),
+        artifact_name(config, "PCA_Scores", ".csv"),
+        artifact_name(config, "PCA_TopFeatures", ".csv"),
+        artifact_name(config, "PCA_Correlation_With_BluePixel", ".csv"),
+        artifact_name(config, "PCA_Report", ".txt"),
         "PCA_Biplot_PC1_PC2.png",
         "PCA_ExplainedVariance.png",
         "PCA_Loadings_PC1.png",
@@ -316,7 +315,7 @@ def _plan_delivery_export(
 
     planned_files: list[dict[str, str]] = []
     for source_name in source_names:
-        if source_name != "PCA_Report.txt" and source_name not in result.generated_files:
+        if source_name != artifact_name(config, "PCA_Report", ".txt") and source_name not in result.generated_files:
             continue
         destination_name = _delivery_filename(source_name, input_stem, config.delivery_filename_mode)
         planned_files.append(
