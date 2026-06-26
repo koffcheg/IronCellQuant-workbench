@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import sys
 import shutil
 import importlib.util
 import zlib
@@ -69,6 +70,25 @@ FINAL_OUTPUT_MAP = {
     "cell_features.csv": ["cell_features_{image_stem}.csv", "cell_features_raw_{image_stem}.csv"],
     "final_frame_summary.csv": ["frame_features_{image_stem}.csv", "frame_features_raw_{image_stem}.csv"],
 }
+
+RAW_LEGEND_COLUMNS = [
+    "display_label",
+    "feature_row_id",
+    "image_name",
+    "frame_id",
+    "object_id",
+    "object_type",
+    "bbox_x",
+    "bbox_y",
+    "bbox_w",
+    "bbox_h",
+    "blue_pixel_percent",
+    "object_pixels",
+    "blue_pixels",
+    "reference_roi_id",
+    "inside_reference_roi",
+    "reference_roi_overlap_fraction",
+]
 
 DEFAULT_PARAMS = {
     "threshold_method": "Li",
@@ -159,6 +179,7 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
         outputs.extend([
             f"blue_table_{image_stem}.xlsx",
             f"cell_features_{image_stem}.csv",
+            f"cell_objects_legend_raw_{image_stem}.csv",
             f"frame_features_{image_stem}.csv",
             f"selection_review_candidates_{image_stem}.csv",
             f"roi_proposals_{image_stem}.csv",
@@ -188,6 +209,7 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
     outputs = [
         f"blue_table_{image_stem}.xlsx",
         f"cell_features_{image_stem}.csv",
+        f"cell_objects_legend_raw_{image_stem}.csv",
         f"frame_features_{image_stem}.csv",
         f"selection_review_candidates_{image_stem}.csv",
         f"reference_roi_regions_{image_stem}.csv",
@@ -274,6 +296,14 @@ def prepare_fiji_input(original_image: Path, output: Path) -> Path:
     fiji_input = work_dir / ("input" + ascii_work_suffix(original_image))
     shutil.copy2(original_image, fiji_input)
     return fiji_input
+
+
+def prepare_fiji_manifest_input(manifest_path: Path, output: Path) -> Path:
+    work_dir = output / "fiji_work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    fiji_manifest = work_dir / "reference_roi_manifest_raw.csv"
+    shutil.copy2(manifest_path, fiji_manifest)
+    return fiji_manifest
 
 
 def build_macro_arg(fiji_input: Path, original_image: Path, output: Path, project: Path, params: dict[str, str]) -> tuple[str, str]:
@@ -791,6 +821,129 @@ def copy_raw_named_aliases(output: Path, image_stem: str) -> None:
         source = output / source_name
         if source.exists():
             shutil.copy2(source, output / target_name)
+
+
+def object_id_sort_key(row: dict[str, str]) -> tuple[int, str]:
+    value = str(row.get("object_id") or "").strip()
+    try:
+        return int(float(value)), value
+    except ValueError:
+        return 999999, value
+
+
+def accepted_cell_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        row for row in rows
+        if str(row.get("accepted_status", "")).strip().lower() == "accepted_cell_candidate"
+    ]
+
+
+def assign_raw_display_labels_and_write_legend(output: Path, image_stem: str) -> None:
+    features_path = output / f"cell_features_{image_stem}.csv"
+    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+
+    for column in ["display_label", "feature_row_id"]:
+        if column not in fieldnames:
+            insert_at = fieldnames.index("frame_id") + 1 if column == "display_label" and "frame_id" in fieldnames else len(fieldnames)
+            fieldnames.insert(insert_at, column)
+
+    accepted = sorted(accepted_cell_rows(rows), key=object_id_sort_key)
+    accepted_ids = {id(row) for row in accepted}
+    labels_by_object_id: dict[str, str] = {}
+    for index, row in enumerate(accepted, start=1):
+        labels_by_object_id[str(row.get("object_id") or "").strip()] = f"C{index:03d}"
+
+    legend_rows: list[dict[str, str]] = []
+    for row in rows:
+        object_id = str(row.get("object_id") or "").strip()
+        if id(row) in accepted_ids:
+            label = labels_by_object_id[object_id]
+            row["display_label"] = label
+            if not str(row.get("feature_row_id") or "").strip():
+                frame_id = str(row.get("frame_id") or "").strip()
+                row["feature_row_id"] = f"{frame_id}_object_{object_id}" if frame_id and object_id else ""
+            legend_rows.append({column: str(row.get(column, "") or "") for column in RAW_LEGEND_COLUMNS})
+        else:
+            row["display_label"] = ""
+
+    rewrite_csv_rows(features_path, rows, fieldnames)
+    legend_path = output / f"cell_objects_legend_raw_{image_stem}.csv"
+    rewrite_csv_rows(legend_path, legend_rows, RAW_LEGEND_COLUMNS)
+
+
+def write_raw_cell_objects_overlay(output: Path, image_stem: str, original_image: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    legend_path = output / f"cell_objects_legend_raw_{image_stem}.csv"
+    with legend_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    with Image.open(original_image) as source:
+        image = source.convert("RGB")
+    draw = ImageDraw.Draw(image)
+    for row in rows:
+        x = int(as_float(row.get("bbox_x")))
+        y = int(as_float(row.get("bbox_y")))
+        w = int(as_float(row.get("bbox_w"), 1))
+        h = int(as_float(row.get("bbox_h"), 1))
+        label = str(row.get("display_label") or "")
+        draw.rectangle((x, y, x + w, y + h), outline=(255, 255, 0), width=5)
+        label_y = y + 4 if y < 24 else y - 22
+        text_w = max(36, 8 * len(label) + 8)
+        draw.rectangle((x, max(0, label_y - 2), x + text_w, max(18, label_y + 18)), fill=(0, 0, 0))
+        draw.text((x + 4, max(0, label_y)), label, fill=(255, 255, 0))
+    image.save(output / f"cell_objects_overlay_raw_{image_stem}.jpg", quality=90)
+
+
+def validate_raw_legend_contract(output: Path, image_stem: str, params: dict[str, str]) -> None:
+    features_path = output / f"cell_features_{image_stem}.csv"
+    legend_path = output / f"cell_objects_legend_raw_{image_stem}.csv"
+    with features_path.open("r", encoding="utf-8-sig", newline="") as f:
+        feature_rows = list(csv.DictReader(f))
+    with legend_path.open("r", encoding="utf-8-sig", newline="") as f:
+        legend_rows = list(csv.DictReader(f))
+
+    accepted = accepted_cell_rows(feature_rows)
+    if len(legend_rows) != len(accepted):
+        raise ValueError(f"raw legend row count {len(legend_rows)} does not match accepted feature rows {len(accepted)}")
+
+    feature_by_id: dict[str, dict[str, str]] = {}
+    labels_by_frame: dict[str, set[str]] = {}
+    for row in accepted:
+        feature_row_id = str(row.get("feature_row_id") or "").strip()
+        display_label = str(row.get("display_label") or "").strip()
+        frame_id = str(row.get("frame_id") or "").strip()
+        if not feature_row_id:
+            raise ValueError(f"accepted row has empty feature_row_id for object_id={row.get('object_id')}")
+        if not display_label:
+            raise ValueError(f"accepted row has empty display_label for object_id={row.get('object_id')}")
+        if feature_row_id in feature_by_id:
+            raise ValueError(f"duplicate feature_row_id in accepted rows: {feature_row_id}")
+        feature_by_id[feature_row_id] = row
+        frame_labels = labels_by_frame.setdefault(frame_id, set())
+        if display_label in frame_labels:
+            raise ValueError(f"duplicate display_label within frame_id={frame_id}: {display_label}")
+        frame_labels.add(display_label)
+
+    for row in legend_rows:
+        feature_row_id = str(row.get("feature_row_id") or "").strip()
+        display_label = str(row.get("display_label") or "").strip()
+        if feature_row_id not in feature_by_id:
+            raise ValueError(f"legend feature_row_id missing from cell_features: {feature_row_id}")
+        feature_row = feature_by_id[feature_row_id]
+        if display_label != str(feature_row.get("display_label") or "").strip():
+            raise ValueError(f"legend display_label mismatch for feature_row_id={feature_row_id}")
+        for column in ["object_id", "bbox_x", "bbox_y", "bbox_w", "bbox_h"]:
+            if str(row.get(column) or "").strip() != str(feature_row.get(column) or "").strip():
+                raise ValueError(f"legend {column} mismatch for feature_row_id={feature_row_id}")
+        overlap = as_float(row.get("reference_roi_overlap_fraction"))
+        if overlap <= 0:
+            raise ValueError(f"reference_roi_overlap_fraction <= 0 for feature_row_id={feature_row_id}")
+        if bool_param(params.get("reference_roi_only", "false")) and str(row.get("inside_reference_roi", "")).lower() != "true":
+            raise ValueError(f"inside_reference_roi is not true in reference_roi_only mode for feature_row_id={feature_row_id}")
 
 
 def move_internal_outputs(output: Path) -> None:
@@ -2052,11 +2205,13 @@ def append_auto_roi_qc_report(output: Path, image_stem: str, proposals: list[dic
         f"- selected_objects_contact_sheet_{image_stem}.jpg\n",
         f"- reference_roi_regions_{image_stem}.csv\n",
         f"- frame_features_{image_stem}.csv\n",
+        f"- cell_objects_legend_raw_{image_stem}.csv\n",
         "\n## Diagnostic outputs, not final selection\n\n",
         f"- roi_proposals_overlay_{image_stem}.jpg\n",
         f"- roi_proposals_{image_stem}.csv\n",
         f"- cellmask_{image_stem}.tif\n",
         f"- blue_inside_cells_{image_stem}.tif\n",
+        f"- cell_objects_overlay_raw_{image_stem}.jpg\n",
         f"- selection_review_candidates_{image_stem}.csv\n",
         f"- review_candidates_contact_sheet_{image_stem}.jpg\n",
     ])
@@ -2171,9 +2326,11 @@ def postprocess_outputs(output: Path, image_stem: str, original_image: Path, par
     copy_final_named_outputs(output, image_stem)
     normalize_public_outputs_metadata(output, image_stem, original_image, short_path_used)
     proposals, qc_status = apply_auto_roi_selection(output, image_stem, original_image, params)
+    assign_raw_display_labels_and_write_legend(output, image_stem)
     append_auto_roi_qc_report(output, image_stem, proposals, qc_status)
     write_selection_review_candidates(output, image_stem)
     if bool_param(params.get("save_overlays", "true")):
+        write_raw_cell_objects_overlay(output, image_stem, original_image)
         write_selected_objects_overlay(output, image_stem, original_image)
         write_selected_contact_sheet(output, image_stem, original_image)
         write_review_candidates_contact_sheet(output, image_stem, original_image)
@@ -2181,6 +2338,7 @@ def postprocess_outputs(output: Path, image_stem: str, original_image: Path, par
     move_internal_outputs(output)
     validate_frame_summary(output)
     validate_cell_feature_table(output)
+    validate_raw_legend_contract(output, image_stem, params)
     validate_output_image_dimensions(output, image_stem, original_image, params)
     # final_frame_summary.csv is written by the macro; Python copies it to the final frame_features_<original_stem>.csv name.
 
@@ -2265,18 +2423,25 @@ def copy_hs_err_logs(output: Path) -> None:
 def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_model: Path, params: dict[str, str], failure_status: str, detail: str) -> None:
     width, height = read_image_dimensions(image)
     write_simple_tiff(output / f"cellmask_{image_stem}.tif", width, height, 0)
+    write_simple_tiff(output / f"cellmask_raw_{image_stem}.tif", width, height, 0)
     write_simple_tiff(output / f"blue_inside_cells_{image_stem}.tif", width, height, 0)
+    write_simple_tiff(output / f"blue_inside_cells_raw_{image_stem}.tif", width, height, 0)
     write_simple_png(output / f"vis_cellpixels_{image_stem}.png", width, height, (80, 0, 80))
+    write_simple_png(output / f"vis_cellpixels_raw_{image_stem}.png", width, height, (80, 0, 80))
     write_simple_png(output / f"roi_overlay_{image_stem}.jpg", width, height, (80, 0, 0))
     write_simple_png(output / f"selected_objects_overlay_{image_stem}.jpg", width, height, (0, 80, 80))
+    write_simple_png(output / f"cell_objects_overlay_raw_{image_stem}.jpg", width, height, (0, 80, 80))
     write_simple_png(output / f"selected_objects_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
     write_simple_png(output / f"review_candidates_contact_sheet_{image_stem}.jpg", max(1, min(width, 880)), max(1, min(height, 232)), (240, 240, 240))
     write_simple_png(output / f"roi_proposals_overlay_{image_stem}.jpg", width, height, (80, 0, 80))
     write_simple_png(output / f"reference_roi_regions_overlay_{image_stem}.jpg", width, height, (80, 80, 0))
 
-    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,auto_roi_id,inside_auto_roi,auto_roi_overlap_fraction,auto_roi_selection_note,roi_seed_status,roi_seed_reason,used_for_auto_roi_proposal,reference_roi_id,inside_reference_roi,reference_roi_overlap_fraction,reference_roi_selection_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
+    cell_header = "image_name,group_name,original_long_path,short_path_used,frame_id,display_label,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,auto_roi_id,inside_auto_roi,auto_roi_overlap_fraction,auto_roi_selection_note,roi_seed_status,roi_seed_reason,used_for_auto_roi_proposal,reference_roi_id,inside_reference_roi,reference_roi_overlap_fraction,reference_roi_selection_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n"
     (output / "cell_features.csv").write_text(cell_header, encoding="utf-8-sig")
     shutil.copy2(output / "cell_features.csv", output / f"cell_features_{image_stem}.csv")
+    with (output / f"cell_objects_legend_raw_{image_stem}.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=RAW_LEGEND_COLUMNS)
+        writer.writeheader()
     (output / "blue_pixels_features.csv").write_text("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", encoding="utf-8-sig")
     write_blue_pixels_xlsx(output)
     shutil.copy2(output / "blue_table.xlsx", output / f"blue_table_{image_stem}.xlsx")
@@ -2305,7 +2470,8 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
     started = datetime.now()
     fiji_input = prepare_fiji_input(image, output)
     reference_roi_manifest = prepare_reference_roi_manifest_raw(output, image, project, params)
-    params = {**params, "reference_roi_manifest": str(reference_roi_manifest)}
+    fiji_reference_roi_manifest = prepare_fiji_manifest_input(reference_roi_manifest, output)
+    params = {**params, "reference_roi_manifest": str(fiji_reference_roi_manifest)}
     if weka_model is not None and not weka_model.exists():
         macro_arg, _ = build_macro_arg(fiji_input, image, output, project, {**params, "weka_model": str(weka_model)})
         write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, {**params, "weka_model": str(weka_model)})
@@ -2438,6 +2604,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()
     project = resolve_project(args.project)
     image = (args.input or discover_default_input(project)).resolve()
