@@ -154,6 +154,7 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
             f"selection_review_candidates_{image_stem}.csv",
             f"roi_proposals_{image_stem}.csv",
             f"reference_roi_regions_{image_stem}.csv",
+            f"reference_roi_candidate_audit_{image_stem}.csv",
         ])
     if bool_param(params.get("save_overlays", "true")):
         outputs.extend(OVERLAY_EXPECTED_OUTPUTS)
@@ -174,6 +175,8 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
         f"cell_features_{image_stem}.csv",
         f"frame_features_{image_stem}.csv",
         f"selection_review_candidates_{image_stem}.csv",
+        f"reference_roi_regions_{image_stem}.csv",
+        f"reference_roi_candidate_audit_{image_stem}.csv",
     ]
     if bool_param(params.get("save_overlays", "true")):
         outputs.extend([
@@ -1068,7 +1071,8 @@ def measure_reference_roi_pixels(original_image: Path, x: int, y: int, w: int, h
         image = source.convert("RGB")
         left = max(0, x); top = max(0, y)
         right = min(image.width, x + max(1, w)); bottom = min(image.height, y + max(1, h))
-        pixels = list(image.crop((left, top, right, bottom)).getdata())
+        roi_crop = image.crop((left, top, right, bottom))
+        pixels = list(iter_rgb_pixels(roi_crop))
     area = len(pixels)
     keys = ["roi_area_pixels", "roi_blue_pixels", "roi_blue_pixel_fraction", "roi_blue_pixel_percent", "R_mean", "G_mean", "B_mean", "R_std", "G_std", "B_std", "R_min", "G_min", "B_min", "R_max", "G_max", "B_max", "B_div_R", "B_div_RGB_sum", "intensity_mean", "intensity_std", "intensity_min", "intensity_max"]
     if area == 0:
@@ -1089,12 +1093,19 @@ def measure_reference_roi_pixels(original_image: Path, x: int, y: int, w: int, h
 
 
 
+def iter_rgb_pixels(image: Any) -> Any:
+    pixels = image.load()
+    for yy in range(image.height):
+        for xx in range(image.width):
+            yield pixels[xx, yy]
+
+
 def is_dark_annotation_pixel(pixel: tuple[int, int, int]) -> bool:
     red, green, blue = pixel
     intensity = (red + green + blue) / 3
     color_spread = max(red, green, blue) - min(red, green, blue)
     saturated_blue = blue > 100 and blue > red + 30 and blue > green + 20
-    return max(red, green, blue) <= 125 and intensity <= 95 and color_spread <= 65 and not saturated_blue
+    return max(red, green, blue) <= 125 and intensity <= 100 and color_spread <= 70 and not saturated_blue
 
 
 def dark_strip_continuity(strip_dark_flags: list[bool], segments: int = 12) -> float:
@@ -1106,7 +1117,7 @@ def dark_strip_continuity(strip_dark_flags: list[bool], segments: int = 12) -> f
         start = round(segment_index * len(strip_dark_flags) / segments)
         end = round((segment_index + 1) * len(strip_dark_flags) / segments)
         segment = strip_dark_flags[start:max(start + 1, end)]
-        if sum(1 for value in segment if value) / len(segment) >= 0.25:
+        if sum(1 for value in segment if value) / len(segment) >= 0.22:
             passing += 1
     return passing / segments
 
@@ -1125,70 +1136,200 @@ def longest_dark_run_fraction(strip_dark_flags: list[bool]) -> float:
     return best / len(strip_dark_flags)
 
 
-def validate_dark_reference_roi_border(original_image: Path, x: int, y: int, w: int, h: int) -> tuple[bool, str]:
+def default_reference_roi_audit_metrics() -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "accepted_as_reference_roi": "false",
+        "reject_reason": "not_evaluated",
+        "interior_dark_ratio": "0.0000",
+        "detected_border_bbox_x": "",
+        "detected_border_bbox_y": "",
+        "detected_border_bbox_w": "",
+        "detected_border_bbox_h": "",
+    }
+    for side in ["top", "bottom", "left", "right"]:
+        metrics[f"{side}_dark_ratio"] = "0.0000"
+        metrics[f"{side}_continuity"] = "0.0000"
+        metrics[f"{side}_longest_run_fraction"] = "0.0000"
+    return metrics
+
+
+def format_reference_roi_audit_metrics(result: dict[str, Any]) -> dict[str, Any]:
+    metrics = default_reference_roi_audit_metrics()
+    metrics["accepted_as_reference_roi"] = "true" if result.get("accepted") else "false"
+    metrics["reject_reason"] = str(result.get("reason", ""))
+    for side in ["top", "bottom", "left", "right"]:
+        side_metrics = result.get("side_metrics", {}).get(side, {})
+        metrics[f"{side}_dark_ratio"] = f"{as_float(str(side_metrics.get('dark_ratio', 0))):.4f}"
+        metrics[f"{side}_continuity"] = f"{as_float(str(side_metrics.get('continuity', 0))):.4f}"
+        metrics[f"{side}_longest_run_fraction"] = f"{as_float(str(side_metrics.get('longest_run_fraction', 0))):.4f}"
+    metrics["interior_dark_ratio"] = f"{as_float(str(result.get('interior_dark_ratio', 0))):.4f}"
+    detected = result.get("detected_bbox")
+    if detected:
+        metrics["detected_border_bbox_x"] = str(detected[0])
+        metrics["detected_border_bbox_y"] = str(detected[1])
+        metrics["detected_border_bbox_w"] = str(detected[2])
+        metrics["detected_border_bbox_h"] = str(detected[3])
+    return metrics
+
+
+def evaluate_dark_reference_roi_bbox(image: Any, x: int, y: int, w: int, h: int) -> dict[str, Any]:
+    left = max(0, x)
+    top = max(0, y)
+    right = min(image.width, x + w)
+    bottom = min(image.height, y + h)
+    if right - left < 120 or bottom - top < 120:
+        return {"accepted": False, "reason": "bbox_too_small_for_reference_border", "score": 0.0, **default_reference_roi_audit_metrics()}
+    thickness = max(5, min(20, round(min(right - left, bottom - top) * 0.04)))
+    strips = {
+        "top": image.crop((left, top, right, min(bottom, top + thickness))),
+        "bottom": image.crop((left, max(top, bottom - thickness), right, bottom)),
+        "left": image.crop((left, top, min(right, left + thickness), bottom)),
+        "right": image.crop((max(left, right - thickness), top, right, bottom)),
+    }
+    side_metrics: dict[str, dict[str, float]] = {}
+    for side_name, strip in strips.items():
+        strip_pixels = strip.load()
+        dark_pixels = 0
+        total_pixels = 0
+        axis_flags = []
+        axis_step = max(1, round(max(strip.width, strip.height) / 900))
+        if side_name in {"top", "bottom"}:
+            for xx in range(0, strip.width, axis_step):
+                axis_dark = 0
+                axis_total = 0
+                for yy in range(strip.height):
+                    axis_total += 1
+                    total_pixels += 1
+                    if is_dark_annotation_pixel(strip_pixels[xx, yy]):
+                        dark_pixels += 1
+                        axis_dark += 1
+                axis_flags.append(axis_dark / max(1, axis_total) >= 0.22)
+        else:
+            for yy in range(0, strip.height, axis_step):
+                axis_dark = 0
+                axis_total = 0
+                for xx in range(strip.width):
+                    axis_total += 1
+                    total_pixels += 1
+                    if is_dark_annotation_pixel(strip_pixels[xx, yy]):
+                        dark_pixels += 1
+                        axis_dark += 1
+                axis_flags.append(axis_dark / max(1, axis_total) >= 0.22)
+        side_metrics[side_name] = {
+            "dark_ratio": dark_pixels / total_pixels,
+            "continuity": dark_strip_continuity(axis_flags),
+            "longest_run_fraction": longest_dark_run_fraction(axis_flags),
+        }
+    inner_margin = max(thickness * 3, round(min(right - left, bottom - top) * 0.08))
+    interior_left = min(right, left + inner_margin)
+    interior_top = min(bottom, top + inner_margin)
+    interior_right = max(interior_left, right - inner_margin)
+    interior_bottom = max(interior_top, bottom - inner_margin)
+    interior = image.crop((interior_left, interior_top, interior_right, interior_bottom))
+    interior_pixels = interior.load()
+    sample_step = max(1, round(((interior.width * interior.height) / 6000) ** 0.5))
+    interior_dark = 0
+    interior_total = 0
+    for yy in range(0, interior.height, sample_step):
+        for xx in range(0, interior.width, sample_step):
+            interior_total += 1
+            if is_dark_annotation_pixel(interior_pixels[xx, yy]):
+                interior_dark += 1
+    interior_dark_ratio = interior_dark / max(1, interior_total)
+    failing_sides = [
+        side for side, values in side_metrics.items()
+        if values["dark_ratio"] < 0.24 or values["continuity"] < 0.58 or values["longest_run_fraction"] < 0.35
+    ]
+    score = sum(values["dark_ratio"] + values["continuity"] + values["longest_run_fraction"] for values in side_metrics.values()) - interior_dark_ratio
+    result: dict[str, Any] = {
+        "accepted": False,
+        "reason": "validated_dark_rectangular_annotation_border",
+        "score": score,
+        "side_metrics": side_metrics,
+        "interior_dark_ratio": interior_dark_ratio,
+        "detected_bbox": (left, top, right - left, bottom - top),
+    }
+    if failing_sides:
+        result["reason"] = "border_not_continuously_dark_on_all_sides:" + ",".join(failing_sides)
+        return result
+    if interior_dark_ratio >= 0.35:
+        result["reason"] = "interior_mostly_dark_not_reference_roi"
+        return result
+    result["accepted"] = True
+    return result
+
+
+def find_dark_edge_position(image: Any, orientation: str, expected: int, start: int, end: int, tolerance: int, prefer: str) -> int:
+    best_position = expected
+    best_ratio = -1.0
+    search_start = max(0, expected - tolerance)
+    search_end = min((image.height if orientation == "horizontal" else image.width) - 1, expected + tolerance)
+    axis_start = max(0, start)
+    axis_end = min(image.width - 1 if orientation == "horizontal" else image.height - 1, end)
+    if axis_end <= axis_start:
+        return expected
+    pixels = image.load()
+    axis_step = max(1, round((axis_end - axis_start + 1) / 900))
+    for position in range(search_start, search_end + 1):
+        dark_count = 0
+        total_count = 0
+        for axis_value in range(axis_start, axis_end + 1, axis_step):
+            pixel = pixels[axis_value, position] if orientation == "horizontal" else pixels[position, axis_value]
+            total_count += 1
+            if is_dark_annotation_pixel(pixel):
+                dark_count += 1
+        ratio = dark_count / max(1, total_count)
+        better_tie = position < best_position if prefer == "min" else position > best_position
+        if ratio > best_ratio or (abs(ratio - best_ratio) < 1e-9 and better_tie):
+            best_ratio = ratio
+            best_position = position
+    return best_position
+
+
+def search_dark_reference_roi_border(original_image: Path, x: int, y: int, w: int, h: int) -> dict[str, Any]:
     from PIL import Image
 
     if w < 120 or h < 120:
-        return False, "bbox_too_small_for_reference_border"
+        return {"accepted": False, "reason": "bbox_too_small_for_reference_border", "score": 0.0, **default_reference_roi_audit_metrics()}
     with Image.open(original_image) as source:
         image = source.convert("RGB")
-        left = max(0, x)
-        top = max(0, y)
-        right = min(image.width, x + w)
-        bottom = min(image.height, y + h)
-        if right - left < 120 or bottom - top < 120:
-            return False, "clipped_bbox_too_small_for_reference_border"
-        thickness = max(5, min(18, round(min(right - left, bottom - top) * 0.035)))
-        strips = {
-            "top": image.crop((left, top, right, min(bottom, top + thickness))),
-            "bottom": image.crop((left, max(top, bottom - thickness), right, bottom)),
-            "left": image.crop((left, top, min(right, left + thickness), bottom)),
-            "right": image.crop((max(left, right - thickness), top, right, bottom)),
-        }
-        side_metrics: dict[str, tuple[float, float, float]] = {}
-        for side_name, strip in strips.items():
-            strip_width, strip_height = strip.size
-            if side_name in {"top", "bottom"}:
-                axis_flags = []
-                for xx in range(strip_width):
-                    column = [is_dark_annotation_pixel(strip.getpixel((xx, yy))) for yy in range(strip_height)]
-                    axis_flags.append(sum(column) / len(column) >= 0.25)
-            else:
-                axis_flags = []
-                for yy in range(strip_height):
-                    row = [is_dark_annotation_pixel(strip.getpixel((xx, yy))) for xx in range(strip_width)]
-                    axis_flags.append(sum(row) / len(row) >= 0.25)
-            pixels = list(strip.getdata())
-            dark_ratio = sum(1 for pixel in pixels if is_dark_annotation_pixel(pixel)) / max(1, len(pixels))
-            continuity = dark_strip_continuity(axis_flags)
-            longest_run = longest_dark_run_fraction(axis_flags)
-            side_metrics[side_name] = (dark_ratio, continuity, longest_run)
+        tolerance = max(12, min(72, round(min(w, h) * 0.18)))
+        base = evaluate_dark_reference_roi_bbox(image, x, y, w, h)
+        left = find_dark_edge_position(image, "vertical", x, y, y + h, tolerance, "min")
+        right = find_dark_edge_position(image, "vertical", x + w, y, y + h, tolerance, "max")
+        top = find_dark_edge_position(image, "horizontal", y, x, x + w, tolerance, "min")
+        bottom = find_dark_edge_position(image, "horizontal", y + h, x, x + w, tolerance, "max")
+        snapped_w = right - left + 1
+        snapped_h = bottom - top + 1
+        candidates = [base]
+        if snapped_w >= 120 and snapped_h >= 120:
+            candidates.append(evaluate_dark_reference_roi_bbox(image, left, top, snapped_w, snapped_h))
+        expanded_left = max(0, x - tolerance)
+        expanded_top = max(0, y - tolerance)
+        expanded_right = min(image.width, x + w + tolerance)
+        expanded_bottom = min(image.height, y + h + tolerance)
+        if expanded_right - expanded_left >= 120 and expanded_bottom - expanded_top >= 120:
+            candidates.append(evaluate_dark_reference_roi_bbox(image, expanded_left, expanded_top, expanded_right - expanded_left, expanded_bottom - expanded_top))
+        accepted = [candidate for candidate in candidates if candidate.get("accepted")]
+        if accepted:
+            return max(accepted, key=lambda item: as_float(str(item.get("score"))))
+        return max(candidates, key=lambda item: as_float(str(item.get("score"))))
 
-        failing_sides = [
-            side for side, (dark_ratio, continuity, longest_run) in side_metrics.items()
-            if dark_ratio < 0.30 or continuity < 0.70 or longest_run < 0.45
-        ]
-        inner_margin = max(thickness * 3, round(min(right - left, bottom - top) * 0.08))
-        interior_left = min(right, left + inner_margin)
-        interior_top = min(bottom, top + inner_margin)
-        interior_right = max(interior_left, right - inner_margin)
-        interior_bottom = max(interior_top, bottom - inner_margin)
-        interior = image.crop((interior_left, interior_top, interior_right, interior_bottom))
-        interior_pixels = list(interior.getdata())
-        interior_dark_ratio = sum(1 for pixel in interior_pixels if is_dark_annotation_pixel(pixel)) / max(1, len(interior_pixels))
-    metric_text = ";".join(f"{side}:dark={vals[0]:.3f},cont={vals[1]:.3f},run={vals[2]:.3f}" for side, vals in side_metrics.items()) + f";interior_dark={interior_dark_ratio:.3f}"
-    if failing_sides:
-        return False, "border_not_continuously_dark_on_all_sides:" + ",".join(failing_sides) + ";" + metric_text
-    if interior_dark_ratio >= 0.35:
-        return False, "interior_mostly_dark_not_reference_roi;" + metric_text
-    return True, "validated_dark_rectangular_annotation_border;" + metric_text
 
-def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_rows: list[dict[str, str]], image_name: str, frame_id: str, original_image: Path, params: dict[str, str]) -> list[dict[str, Any]]:
+def validate_dark_reference_roi_border(original_image: Path, x: int, y: int, w: int, h: int) -> tuple[bool, str]:
+    result = search_dark_reference_roi_border(original_image, x, y, w, h)
+    metrics = format_reference_roi_audit_metrics(result)
+    metric_text = ";".join(f"{key}={value}" for key, value in metrics.items() if key not in {"accepted_as_reference_roi", "reject_reason"})
+    return bool(result.get("accepted")), str(result.get("reason", "")) + ";" + metric_text
+
+
+def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_rows: list[dict[str, str]], image_name: str, frame_id: str, original_image: Path, params: dict[str, str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     from PIL import Image
 
     with Image.open(original_image) as source:
         image_width, image_height = source.size
     regions: list[dict[str, Any]] = []
+    audit_rows: list[dict[str, Any]] = []
     for row in rejected_rows:
         classification = str(row.get("classification", "")).strip().lower()
         reject_reason = str(row.get("reject_reason", "")).strip().lower()
@@ -1202,14 +1343,25 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
         if not is_large_aggregate_seed and not is_manual_reference_box:
             continue
         source_reason = "large_rejected_aggregate_roi_seed" if is_large_aggregate_seed else "detected_black_reference_box_border_seed"
-        border_ok, border_note = validate_dark_reference_roi_border(original_image, x, y, w, h)
-        if not border_ok:
+        border_result = search_dark_reference_roi_border(original_image, x, y, w, h)
+        audit_row = {
+            "candidate_source_object_id": str(row.get("object_id", "")),
+            "candidate_source_reason": source_reason,
+            "candidate_bbox_x": x,
+            "candidate_bbox_y": y,
+            "candidate_bbox_w": w,
+            "candidate_bbox_h": h,
+        }
+        audit_row.update(format_reference_roi_audit_metrics(border_result))
+        audit_rows.append(audit_row)
+        if not border_result.get("accepted"):
             continue
-        margin = max(8, min(24, round(min(w, h) * 0.03)))
-        inner_x = x + margin
-        inner_y = y + margin
-        inner_w = max(1, w - 2 * margin)
-        inner_h = max(1, h - 2 * margin)
+        detected_x, detected_y, detected_w, detected_h = border_result.get("detected_bbox", (x, y, w, h))
+        margin = max(8, min(28, round(min(detected_w, detected_h) * 0.04)))
+        inner_x = detected_x + margin
+        inner_y = detected_y + margin
+        inner_w = max(1, detected_w - 2 * margin)
+        inner_h = max(1, detected_h - 2 * margin)
         reference_roi_id = f"{frame_id}_reference_roi_{len(regions) + 1}"
         measurement = measure_reference_roi_pixels(original_image, inner_x, inner_y, inner_w, inner_h, params)
         region = {
@@ -1227,20 +1379,19 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
             "selection_unit_type": "reference_roi_regions",
             "source_object_id": str(row.get("object_id", "")),
             "source_reason": source_reason,
-            "roi_bbox_x": x,
-            "roi_bbox_y": y,
-            "roi_bbox_w": w,
-            "roi_bbox_h": h,
+            "roi_bbox_x": detected_x,
+            "roi_bbox_y": detected_y,
+            "roi_bbox_w": detected_w,
+            "roi_bbox_h": detected_h,
             "roi_inner_x": inner_x,
             "roi_inner_y": inner_y,
             "roi_inner_w": inner_w,
             "roi_inner_h": inner_h,
-            "roi_review_note": ("reference_roi_region_from_large_aggregate_seed" if is_large_aggregate_seed else "reference_roi_region_from_detected_black_box") + ";" + border_note,
+            "roi_review_note": ("reference_roi_region_from_large_aggregate_seed" if is_large_aggregate_seed else "reference_roi_region_from_detected_black_box") + ";" + str(border_result.get("reason", "")),
         }
         region.update(measurement)
         regions.append(region)
-    return regions
-
+    return regions, audit_rows
 
 def write_reference_roi_regions_csv(output: Path, image_stem: str, regions: list[dict[str, Any]]) -> None:
     fieldnames = [
@@ -1257,6 +1408,24 @@ def write_reference_roi_regions_csv(output: Path, image_stem: str, regions: list
         writer.writeheader()
         for region in regions:
             writer.writerow({name: region.get(name, "") for name in fieldnames})
+
+
+def write_reference_roi_candidate_audit_csv(output: Path, image_stem: str, audit_rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "candidate_source_object_id", "candidate_source_reason",
+        "candidate_bbox_x", "candidate_bbox_y", "candidate_bbox_w", "candidate_bbox_h",
+        "accepted_as_reference_roi", "reject_reason",
+        "top_dark_ratio", "bottom_dark_ratio", "left_dark_ratio", "right_dark_ratio",
+        "top_continuity", "bottom_continuity", "left_continuity", "right_continuity",
+        "top_longest_run_fraction", "bottom_longest_run_fraction", "left_longest_run_fraction", "right_longest_run_fraction",
+        "interior_dark_ratio",
+        "detected_border_bbox_x", "detected_border_bbox_y", "detected_border_bbox_w", "detected_border_bbox_h",
+    ]
+    with (output / f"reference_roi_candidate_audit_{image_stem}.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for audit_row in audit_rows:
+            writer.writerow({name: audit_row.get(name, "") for name in fieldnames})
 
 
 def write_reference_roi_regions_overlay(output: Path, image_stem: str, original_image: Path, regions: list[dict[str, Any]]) -> None:
@@ -1350,7 +1519,8 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
             rejected_rows = list(csv.DictReader(f))
     proposals = derive_auto_roi_proposals(rows, image_name, frame_id, rejected_rows)
     accepted_source_rows = [row for row in rows if str(row.get("accepted_status", "")).strip().lower() == "accepted_cell_candidate"]
-    reference_regions = derive_reference_roi_regions(rejected_rows, accepted_source_rows, image_name, frame_id, original_image, params)
+    reference_regions, reference_roi_audit_rows = derive_reference_roi_regions(rejected_rows, accepted_source_rows, image_name, frame_id, original_image, params)
+    write_reference_roi_candidate_audit_csv(output, image_stem, reference_roi_audit_rows)
 
     accepted_rows: list[dict[str, str]] = []
     for row in rows:
