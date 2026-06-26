@@ -18,6 +18,9 @@ wekaModelPath = getArgString(arg, "weka_model", "");
 wekaFailureStatus = "";
 wekaTileSize = parseFloat(getArgString(arg, "weka_tile_size", "768"));
 wekaTileOverlap = parseFloat(getArgString(arg, "weka_tile_overlap", "64"));
+referenceRoiOnly = getArgBool(arg, "reference_roi_only", 0);
+referenceRoiManifestPath = getArgString(arg, "reference_roi_manifest", "");
+referenceRoiCount = 0;
 
 thresholdMethod = getArgString(arg, "threshold_method", "Li");
 thresholdMode = getArgString(arg, "threshold_mode", "bright");
@@ -69,6 +72,7 @@ logLine("Group: " + groupName);
 if (wekaModelPath != "") {
     logLine("Weka model: " + wekaModelPath);
     logLine("Weka tile size: " + wekaTileSize + " overlap=" + wekaTileOverlap);
+    logLine("Reference ROI only: " + boolText(referenceRoiOnly) + " manifest=" + referenceRoiManifestPath);
 }
 logLine("Feature definition: blue_pixel_fraction = blue_pixels / object_pixels. This is a preliminary blue-pixel optical feature, not a calibrated concentration measurement.");
 
@@ -130,6 +134,17 @@ selectWindow(redTitle); rename("Red_Channel"); redTitle = "Red_Channel";
 selectWindow(greenTitle); rename("Green_Channel"); greenTitle = "Green_Channel";
 selectWindow(blueTitle); rename("Blue_Channel"); blueTitle = "Blue_Channel";
 checkpoint("after_split_rgb_channels");
+
+if (referenceRoiManifestPath != "") {
+    checkpoint("before_reference_roi_inner_mask");
+    referenceRoiCount = createReferenceRoiInnerMask(referenceRoiManifestPath);
+    logLine("Reference ROI manifest count: " + referenceRoiCount);
+    if (saveOverlays == 1) saveDebugImage("ReferenceRoiInnerMask", "reference_roi_inner_mask.tif");
+    checkpoint("after_reference_roi_inner_mask count=" + referenceRoiCount);
+}
+if (referenceRoiOnly == 1 && referenceRoiCount <= 0) {
+    exit("FAIL_REFERENCE_ROI_NOT_FOUND: reference_roi_only mode requires a non-empty reference_roi_manifest; full-frame Weka is disabled.");
+}
 
 checkpoint("before_prepare_segmentation_gray");
 if (wekaModelPath != "") {
@@ -218,6 +233,25 @@ if (borderMarginPx > 0) {
     makeRectangle(maxOf(0, width - borderMarginPx), 0, minOf(borderMarginPx, width), height); run("Clear", "slice");
 }
 run("Select None");
+if (referenceRoiCount > 0) {
+    checkpoint("before_roi_gate_cell_material_after_morphology");
+    imageCalculator("AND create", cellMaskTitle, "ReferenceRoiInnerMask");
+    rename("CellMaterialMask_RoiGated");
+    selectWindow(cellMaskTitle);
+    close();
+    selectWindow("CellMaterialMask_RoiGated");
+    rename("CellMaterialMask");
+    cellMaskTitle = "CellMaterialMask";
+    checkpoint("after_roi_gate_cell_material_after_morphology");
+}
+if (saveOverlays == 1) {
+    requireWindow(cellMaskTitle);
+    run("Select None");
+    run("Duplicate...", "title=CellMaterialMaskRawSave");
+    requireWindow("CellMaterialMaskRawSave");
+    saveAs("Tiff", outputDir + "/cellmask_raw.tif");
+    close();
+}
 if (saveOverlays == 1) saveDebugImage(cellMaskTitle, "debug_candidate_mask_cleaned.tif");
 checkpoint("after_clear_border_metadata_artifacts");
 
@@ -238,8 +272,24 @@ imageCalculator("AND create", "Blue_Min_Mask", "Blue_Minus_R");
 rename("Blue_Tmp_1");
 imageCalculator("AND create", "Blue_Tmp_1", "Blue_Minus_G");
 rename("Blue_Candidate_Mask");
+if (referenceRoiCount > 0) {
+    imageCalculator("AND create", "Blue_Candidate_Mask", "ReferenceRoiInnerMask");
+    rename("Blue_Candidate_Mask_RoiGated");
+    selectWindow("Blue_Candidate_Mask");
+    close();
+    selectWindow("Blue_Candidate_Mask_RoiGated");
+    rename("Blue_Candidate_Mask");
+}
 imageCalculator("AND create", "Blue_Candidate_Mask", cellMaskTitle);
 rename("BlueInsideCells");
+if (saveOverlays == 1) {
+    requireWindow("BlueInsideCells");
+    run("Select None");
+    run("Duplicate...", "title=BlueInsideCellsRawSave");
+    requireWindow("BlueInsideCellsRawSave");
+    saveAs("Tiff", outputDir + "/blue_inside_cells_raw.tif");
+    close();
+}
 totalBluePixelsInMask = whiteCount("BlueInsideCells");
 checkpoint("after_blue_mask_creation total_blue_pixels_in_cleaned_mask=" + totalBluePixelsInMask);
 
@@ -302,6 +352,20 @@ if (saveOverlays == 1) {
     selectWindow("Original_RGB");
     run("Duplicate...", "title=SelectedObjectsOverlay");
     newImage("Accepted_Objects_Mask", "8-bit black", width, height, 1);
+    requireWindow("Original_RGB");
+    run("Select None");
+    run("Duplicate...", "title=VisCellPixelsRaw");
+    requireWindow(cellMaskTitle);
+    run("Create Selection");
+    if (selectionType() != -1) {
+        requireWindow("VisCellPixelsRaw");
+        run("Restore Selection");
+        setForegroundColor(255,0,255);
+        run("Fill", "slice");
+        run("Select None");
+    }
+    requireWindow("VisCellPixelsRaw");
+    saveAs("Png", outputDir + "/vis_cellpixels_raw.png");
     checkpoint("after_overlay_setup");
 }
 
@@ -611,6 +675,7 @@ if (saveOverlays == 1) {
     requireWindow("SelectedObjectsOverlay");
     run("Select None");
     saveAs("Jpeg", outputDir + "/selected_objects_overlay.jpg");
+    saveAs("Jpeg", outputDir + "/cell_objects_overlay_raw.jpg");
     checkpoint("after_save_selected_objects_overlay");
 }
 
@@ -937,6 +1002,36 @@ function writeQcReport(qcStatus) {
 }
 
 
+function createReferenceRoiInnerMask(manifestPath) {
+    statusPath = outputDir + "/reference_roi_inner_mask_status.txt";
+    script = "";
+    script += "var IJ = Packages.ij.IJ;\n";
+    script += "var FileWriter = Packages.java.io.FileWriter;\n";
+    script += "var Files = Packages.java.nio.file.Files;\n";
+    script += "var Paths = Packages.java.nio.file.Paths;\n";
+    script += "var ByteProcessor = Packages.ij.process.ByteProcessor;\n";
+    script += "var ImagePlus = Packages.ij.ImagePlus;\n";
+    script += "try {\n";
+    script += "  var w = " + width + "; var h = " + height + "; var bp = new ByteProcessor(w, h); var count = 0;\n";
+    script += "  var lines = String(new java.lang.String(Files.readAllBytes(Paths.get('" + jsPath(manifestPath) + "')), 'UTF-8')).replace(/^\\uFEFF/, '').split(/\\r?\\n/);\n";
+    script += "  if (lines.length > 0) { var header = String(lines[0]).split(','); var ix=-1, iy=-1, iw=-1, ih=-1;\n";
+    script += "    for (var hi=0; hi<header.length; hi++) { var hn=String(header[hi]).replace(/^\\uFEFF/, ''); if (hn=='roi_inner_x') ix=hi; if (hn=='roi_inner_y') iy=hi; if (hn=='roi_inner_w') iw=hi; if (hn=='roi_inner_h') ih=hi; }\n";
+    script += "    for (var li=1; li<lines.length; li++) { var line=String(lines[li]); if (line.trim()=='' || ix<0 || iy<0 || iw<0 || ih<0) continue; var parts=line.split(',');\n";
+    script += "      var rx=Math.floor(parseFloat(parts[ix])); var ry=Math.floor(parseFloat(parts[iy])); var rw=Math.floor(parseFloat(parts[iw])); var rh=Math.floor(parseFloat(parts[ih]));\n";
+    script += "      var x0=Math.max(0, rx); var y0=Math.max(0, ry); var x1=Math.min(w, rx+rw); var y1=Math.min(h, ry+rh);\n";
+    script += "      if (x1 <= x0 || y1 <= y0) continue; count++;\n";
+    script += "      for (var yy=y0; yy<y1; yy++) for (var xx=x0; xx<x1; xx++) bp.set(xx, yy, 255);\n";
+    script += "    }\n";
+    script += "  }\n";
+    script += "  var mask = new ImagePlus('ReferenceRoiInnerMask', bp); mask.show(); var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write(String(count)); fw.close();\n";
+    script += "} catch (e) { var fw = new FileWriter('" + jsPath(statusPath) + "'); fw.write('FAIL\\n' + e); fw.close(); }\n";
+    eval("script", script);
+    status = File.openAsString(statusPath);
+    if (startsWith(status, "FAIL")) exit("FAIL_REFERENCE_ROI_MANIFEST_READ: " + status);
+    return parseFloat(status);
+}
+
+
 function runWekaPrediction(modelPath) {
     statusPath = outputDir + "/weka_status.txt";
     classMapPath = outputDir + "/debug_weka_class_map.tif";
@@ -954,6 +1049,8 @@ function runWekaPrediction(modelPath) {
     script += "  var ByteProcessor = Packages.ij.process.ByteProcessor;\n";
     script += "  var ImagePlus = Packages.ij.ImagePlus;\n";
     script += "  var Integer = Packages.java.lang.Integer;\n";
+    script += "  var Files = Packages.java.nio.file.Files;\n";
+    script += "  var Paths = Packages.java.nio.file.Paths;\n";
     script += "  var imp = WM.getImage('Original_RGB');\n";
     script += "  var w = imp.getWidth(); var h = imp.getHeight();\n";
     script += "  var tileSize = " + d2s(wekaTileSize, 0) + "; var overlap = " + d2s(wekaTileOverlap, 0) + ";\n";
@@ -962,11 +1059,27 @@ function runWekaPrediction(modelPath) {
     script += "  if (overlap * 2 >= tileSize) overlap = Math.floor(tileSize / 4);\n";
     script += "  var step = tileSize - 2 * overlap; if (step < 64) step = tileSize;\n";
     script += "  var full = new ByteProcessor(w, h);\n";
+    script += "  var rois = [];\n";
+    script += "  var manifestPath = '" + jsPath(referenceRoiManifestPath) + "';\n";
+    script += "  var referenceOnly = " + d2s(referenceRoiOnly, 0) + ";\n";
+    script += "  if (manifestPath != '') {\n";
+    script += "    var lines = String(new java.lang.String(Files.readAllBytes(Paths.get(manifestPath)), 'UTF-8')).replace(/^\\uFEFF/, '').split(/\\r?\\n/);\n";
+    script += "    if (lines.length > 0) { var header = String(lines[0]).split(','); var ix=-1, iy=-1, iw=-1, ih=-1;\n";
+    script += "      for (var hi=0; hi<header.length; hi++) { var hn=String(header[hi]).replace(/^\\uFEFF/, ''); if (hn=='roi_inner_x') ix=hi; if (hn=='roi_inner_y') iy=hi; if (hn=='roi_inner_w') iw=hi; if (hn=='roi_inner_h') ih=hi; }\n";
+    script += "      for (var li=1; li<lines.length; li++) { var line=String(lines[li]); if (line.trim()=='' || ix<0 || iy<0 || iw<0 || ih<0) continue; var parts=line.split(',');\n";
+    script += "        var rx=Math.floor(parseFloat(parts[ix])); var ry=Math.floor(parseFloat(parts[iy])); var rw=Math.floor(parseFloat(parts[iw])); var rh=Math.floor(parseFloat(parts[ih]));\n";
+    script += "        if (rw > 0 && rh > 0) rois.push([Math.max(0, rx), Math.max(0, ry), Math.min(rw, w-rx), Math.min(rh, h-ry)]);\n";
+    script += "      }\n";
+    script += "    }\n";
+    script += "  }\n";
+    script += "  if (referenceOnly == 1 && rois.length == 0) throw 'FAIL_REFERENCE_ROI_NOT_FOUND';\n";
+    script += "  if (rois.length == 0) rois.push([0, 0, w, h]);\n";
     script += "  var savedFirstProbability = false; var tileCount = 0;\n";
     script += "  ck('before_first_weka_tile');\n";
-    script += "  for (var y = 0; y < h; y += step) {\n";
-    script += "    for (var x = 0; x < w; x += step) {\n";
-    script += "      var tw = Math.floor(Math.min(tileSize, w - x)); var th = Math.floor(Math.min(tileSize, h - y));\n";
+    script += "  for (var ri = 0; ri < rois.length; ri++) { var roi = rois[ri]; var rx0 = roi[0]; var ry0 = roi[1]; var rw0 = roi[2]; var rh0 = roi[3]; ck('before_weka_roi_' + (ri+1));\n";
+    script += "  for (var y = ry0; y < ry0 + rh0; y += step) {\n";
+    script += "    for (var x = rx0; x < rx0 + rw0; x += step) {\n";
+    script += "      var tw = Math.floor(Math.min(tileSize, rx0 + rw0 - x)); var th = Math.floor(Math.min(tileSize, ry0 + rh0 - y));\n";
     script += "      var xi = Integer.valueOf(String(Math.floor(x))); var yi = Integer.valueOf(String(Math.floor(y)));\n";
     script += "      var twi = Integer.valueOf(String(tw)); var thi = Integer.valueOf(String(th));\n";
     script += "      if (twi.intValue() <= 0 || thi.intValue() <= 0) continue;\n";
@@ -980,8 +1093,8 @@ function runWekaPrediction(modelPath) {
     script += "      probability.setSlice(1);\n";
     script += "      var proc = probability.getProcessor();\n";
     script += "      var threshold = (probability.getBitDepth() == 32) ? 0.5 : 128;\n";
-    script += "      var left = (x == 0) ? 0 : overlap; var top = (y == 0) ? 0 : overlap;\n";
-    script += "      var right = (x + tw >= w) ? 0 : overlap; var bottom = (y + th >= h) ? 0 : overlap;\n";
+    script += "      var left = (x == rx0) ? 0 : overlap; var top = (y == ry0) ? 0 : overlap;\n";
+    script += "      var right = (x + tw >= rx0 + rw0) ? 0 : overlap; var bottom = (y + th >= ry0 + rh0) ? 0 : overlap;\n";
     script += "      for (var yy = top; yy < th - bottom; yy++) {\n";
     script += "        for (var xx = left; xx < tw - right; xx++) {\n";
     script += "          if (proc.getf(xx, yy) >= threshold) full.set(x + xx, y + yy, 255);\n";
@@ -990,6 +1103,7 @@ function runWekaPrediction(modelPath) {
     script += "      tileCount++; if (tileCount % 10 == 0) ck('after_weka_tile_' + tileCount);\n";
     script += "      tile.close(); probability.close();\n";
     script += "    }\n";
+    script += "  }\n";
     script += "  }\n";
     script += "  ck('after_weka_tile_count_' + tileCount);\n";
     script += "  imp.killRoi();\n";

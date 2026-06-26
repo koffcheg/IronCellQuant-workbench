@@ -34,10 +34,14 @@ RUNNER_WRITTEN_OUTPUTS = {
 
 OVERLAY_EXPECTED_OUTPUTS = [
     "cellmask.tif",
+    "cellmask_raw.tif",
     "vis_cellpixels.png",
+    "vis_cellpixels_raw.png",
     "roi_overlay.jpg",
     "selected_objects_overlay.jpg",
+    "cell_objects_overlay_raw.jpg",
     "blue_inside_cells.tif",
+    "blue_inside_cells_raw.tif",
 ]
 
 DEBUG_OUTPUTS = [
@@ -52,14 +56,18 @@ DEBUG_OUTPUTS = [
 ]
 
 FINAL_OUTPUT_MAP = {
-    "cellmask.tif": "cellmask_{image_stem}.tif",
-    "vis_cellpixels.png": "vis_cellpixels_{image_stem}.png",
-    "roi_overlay.jpg": "roi_overlay_{image_stem}.jpg",
-    "selected_objects_overlay.jpg": "selected_objects_overlay_{image_stem}.jpg",
-    "blue_inside_cells.tif": "blue_inside_cells_{image_stem}.tif",
-    "blue_table.xlsx": "blue_table_{image_stem}.xlsx",
-    "cell_features.csv": "cell_features_{image_stem}.csv",
-    "final_frame_summary.csv": "frame_features_{image_stem}.csv",
+    "cellmask.tif": ["cellmask_{image_stem}.tif"],
+    "cellmask_raw.tif": "cellmask_raw_{image_stem}.tif",
+    "vis_cellpixels.png": ["vis_cellpixels_{image_stem}.png"],
+    "vis_cellpixels_raw.png": "vis_cellpixels_raw_{image_stem}.png",
+    "roi_overlay.jpg": ["roi_overlay_{image_stem}.jpg"],
+    "selected_objects_overlay.jpg": ["selected_objects_overlay_{image_stem}.jpg"],
+    "cell_objects_overlay_raw.jpg": "cell_objects_overlay_raw_{image_stem}.jpg",
+    "blue_inside_cells.tif": ["blue_inside_cells_{image_stem}.tif"],
+    "blue_inside_cells_raw.tif": "blue_inside_cells_raw_{image_stem}.tif",
+    "blue_table.xlsx": ["blue_table_{image_stem}.xlsx", "blue_table_raw_{image_stem}.xlsx"],
+    "cell_features.csv": ["cell_features_{image_stem}.csv", "cell_features_raw_{image_stem}.csv"],
+    "final_frame_summary.csv": ["frame_features_{image_stem}.csv", "frame_features_raw_{image_stem}.csv"],
 }
 
 DEFAULT_PARAMS = {
@@ -97,6 +105,7 @@ DEFAULT_PARAMS = {
     "min_stable_accepted_pixels": "500",
     "weka_tile_size": "768",
     "weka_tile_overlap": "64",
+    "reference_roi_only": "true",
     "frame_select_top_size": "40",
     "frame_select_top_blue": "20",
     "frame_select_max_near_full_blue": "5",
@@ -154,6 +163,7 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
             f"selection_review_candidates_{image_stem}.csv",
             f"roi_proposals_{image_stem}.csv",
             f"reference_roi_regions_{image_stem}.csv",
+            f"reference_roi_manifest_raw_{image_stem}.csv",
             f"reference_roi_candidate_audit_{image_stem}.csv",
         ])
     if bool_param(params.get("save_overlays", "true")):
@@ -164,7 +174,12 @@ def expected_outputs(params: dict[str, str], image_stem: str | None = None) -> l
                 f"vis_cellpixels_{image_stem}.png",
                 f"roi_overlay_{image_stem}.jpg",
                 f"selected_objects_overlay_{image_stem}.jpg",
+                f"cell_objects_overlay_raw_{image_stem}.jpg",
                 f"blue_inside_cells_{image_stem}.tif",
+                f"cellmask_raw_{image_stem}.tif",
+                f"blue_inside_cells_raw_{image_stem}.tif",
+                f"vis_cellpixels_raw_{image_stem}.png",
+                f"reference_roi_manifest_overlay_{image_stem}.jpg",
             ])
     return outputs
 
@@ -176,6 +191,7 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
         f"frame_features_{image_stem}.csv",
         f"selection_review_candidates_{image_stem}.csv",
         f"reference_roi_regions_{image_stem}.csv",
+        f"reference_roi_manifest_raw_{image_stem}.csv",
         f"reference_roi_candidate_audit_{image_stem}.csv",
     ]
     if bool_param(params.get("save_overlays", "true")):
@@ -188,7 +204,12 @@ def final_expected_outputs(params: dict[str, str], image_stem: str) -> list[str]
             f"review_candidates_contact_sheet_{image_stem}.jpg",
             f"roi_proposals_overlay_{image_stem}.jpg",
             f"reference_roi_regions_overlay_{image_stem}.jpg",
+            f"reference_roi_manifest_overlay_{image_stem}.jpg",
             f"blue_inside_cells_{image_stem}.tif",
+            f"cellmask_raw_{image_stem}.tif",
+            f"blue_inside_cells_raw_{image_stem}.tif",
+            f"vis_cellpixels_raw_{image_stem}.png",
+            f"cell_objects_overlay_raw_{image_stem}.jpg",
         ])
     return outputs
 
@@ -666,15 +687,14 @@ def read_uncompressed_tiff_mask_stats(path: Path) -> dict[str, int]:
 def images_effectively_same(path_a: Path, path_b: Path) -> bool:
     if importlib.util.find_spec("PIL") is None:
         return False
-    from PIL import Image, ImageChops, ImageStat
+    from PIL import Image, ImageChops
     with Image.open(path_a) as image_a, Image.open(path_b) as image_b:
         image_a = image_a.convert("RGB")
         image_b = image_b.convert("RGB")
         if image_a.size != image_b.size:
             return False
         diff = ImageChops.difference(image_a, image_b)
-        stat = ImageStat.Stat(diff)
-        return max(stat.mean) < 0.5
+        return diff.getbbox() is None
 
 
 def validate_frame_summary(output: Path) -> dict[str, float]:
@@ -702,10 +722,14 @@ def validate_output_image_dimensions(output: Path, image_stem: str, original_ima
     expected = read_image_dimensions(original_image)
     final_names = [
         f"cellmask_{image_stem}.tif",
+        f"cellmask_raw_{image_stem}.tif",
         f"blue_inside_cells_{image_stem}.tif",
+        f"blue_inside_cells_raw_{image_stem}.tif",
         f"vis_cellpixels_{image_stem}.png",
+        f"vis_cellpixels_raw_{image_stem}.png",
         f"roi_overlay_{image_stem}.jpg",
         f"selected_objects_overlay_{image_stem}.jpg",
+        f"cell_objects_overlay_raw_{image_stem}.jpg",
     ]
     for name in final_names:
         actual = read_image_dimensions(output / name)
@@ -748,16 +772,31 @@ def validate_cell_feature_table(output: Path) -> None:
 
 
 def copy_final_named_outputs(output: Path, image_stem: str) -> None:
-    for source_name, target_template in FINAL_OUTPUT_MAP.items():
+    for source_name, target_templates in FINAL_OUTPUT_MAP.items():
         source = output / source_name
         if source.exists():
-            shutil.copy2(source, output / target_template.format(image_stem=image_stem))
+            if isinstance(target_templates, str):
+                target_templates = [target_templates]
+            for target_template in target_templates:
+                shutil.copy2(source, output / target_template.format(image_stem=image_stem))
+
+
+def copy_raw_named_aliases(output: Path, image_stem: str) -> None:
+    aliases = {
+        f"cell_features_{image_stem}.csv": f"cell_features_raw_{image_stem}.csv",
+        f"frame_features_{image_stem}.csv": f"frame_features_raw_{image_stem}.csv",
+        f"blue_table_{image_stem}.xlsx": f"blue_table_raw_{image_stem}.xlsx",
+    }
+    for source_name, target_name in aliases.items():
+        source = output / source_name
+        if source.exists():
+            shutil.copy2(source, output / target_name)
 
 
 def move_internal_outputs(output: Path) -> None:
     internal = output / "_internal"
     internal.mkdir(exist_ok=True)
-    for name in set(ALWAYS_EXPECTED_OUTPUTS + OVERLAY_EXPECTED_OUTPUTS + DEBUG_OUTPUTS + ["blue_table.xlsx", "fiji_stdout.txt", "fiji_stderr.txt", "runner_command.txt", "fiji_work"]):
+    for name in set(ALWAYS_EXPECTED_OUTPUTS + OVERLAY_EXPECTED_OUTPUTS + DEBUG_OUTPUTS + ["blue_table.xlsx", "reference_roi_inner_mask.tif", "fiji_stdout.txt", "fiji_stderr.txt", "runner_command.txt", "fiji_work"]):
         source = output / name
         if source.exists():
             target = internal / name
@@ -1571,6 +1610,22 @@ def write_reference_roi_regions_csv(output: Path, image_stem: str, regions: list
             writer.writerow({name: region.get(name, "") for name in fieldnames})
 
 
+def write_reference_roi_manifest_raw_csv(output: Path, image_stem: str, regions: list[dict[str, Any]]) -> Path:
+    manifest_path = output / f"reference_roi_manifest_raw_{image_stem}.csv"
+    write_reference_roi_regions_csv(output, image_stem, regions)
+    (output / f"reference_roi_regions_{image_stem}.csv").replace(manifest_path)
+    write_reference_roi_regions_csv(output, image_stem, regions)
+    return manifest_path
+
+
+def read_reference_roi_manifest_raw(output: Path, image_stem: str) -> list[dict[str, Any]]:
+    manifest_path = output / f"reference_roi_manifest_raw_{image_stem}.csv"
+    if not manifest_path.exists():
+        return []
+    with manifest_path.open("r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
 def write_reference_roi_candidate_audit_csv(output: Path, image_stem: str, audit_rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "candidate_source_object_id", "candidate_source_reason",
@@ -1606,6 +1661,32 @@ def write_reference_roi_regions_overlay(output: Path, image_stem: str, original_
         draw.text((x + 4, max(0, label_y)), label, fill=(255, 0, 0))
     image.save(output / f"reference_roi_regions_overlay_{image_stem}.jpg", quality=90)
     image.save(output / f"selected_objects_overlay_{image_stem}.jpg", quality=90)
+
+
+def write_reference_roi_manifest_overlay(output: Path, image_stem: str, original_image: Path, regions: list[dict[str, Any]]) -> None:
+    write_reference_roi_regions_overlay(output, image_stem, original_image, regions)
+    shutil.copy2(
+        output / f"reference_roi_regions_overlay_{image_stem}.jpg",
+        output / f"reference_roi_manifest_overlay_{image_stem}.jpg",
+    )
+
+
+def prepare_reference_roi_manifest_raw(output: Path, image: Path, project: Path, params: dict[str, str]) -> Path:
+    image_stem = image.stem
+    frame_id = make_frame_id(image_stem)
+    regions, audit_rows = derive_reference_roi_regions([], [], image.name, frame_id, image, params)
+    group_name = group_name_for(image, project)
+    for region in regions:
+        region["group_name"] = group_name
+    write_reference_roi_candidate_audit_csv(output, image_stem, audit_rows)
+    manifest_path = write_reference_roi_manifest_raw_csv(output, image_stem, regions)
+    write_reference_roi_manifest_overlay(output, image_stem, image, regions)
+    if bool_param(params.get("reference_roi_only", "false")) and not regions:
+        raise RuntimeError(
+            "FAIL_REFERENCE_ROI_NOT_FOUND: reference_roi_only mode requires at least one validated dark reference ROI; "
+            "full-frame Weka was not run."
+        )
+    return manifest_path
 
 
 def read_selection_unit_type(output: Path, image_stem: str) -> str:
@@ -1680,8 +1761,11 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
             rejected_rows = list(csv.DictReader(f))
     proposals = derive_auto_roi_proposals(rows, image_name, frame_id, rejected_rows)
     accepted_source_rows = [row for row in rows if str(row.get("accepted_status", "")).strip().lower() == "accepted_cell_candidate"]
-    reference_regions, reference_roi_audit_rows = derive_reference_roi_regions(rejected_rows, accepted_source_rows, image_name, frame_id, original_image, params)
-    write_reference_roi_candidate_audit_csv(output, image_stem, reference_roi_audit_rows)
+    reference_roi_only = bool_param(params.get("reference_roi_only", "false"))
+    reference_regions = read_reference_roi_manifest_raw(output, image_stem) if reference_roi_only else []
+    if not reference_regions:
+        reference_regions, reference_roi_audit_rows = derive_reference_roi_regions(rejected_rows, accepted_source_rows, image_name, frame_id, original_image, params)
+        write_reference_roi_candidate_audit_csv(output, image_stem, reference_roi_audit_rows)
 
     accepted_rows: list[dict[str, str]] = []
     for row in rows:
@@ -1726,7 +1810,7 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
         row["selected_for_frame_summary"] = "false"
         accepted_rows.append(row)
 
-    if reference_regions:
+    if reference_regions and not reference_roi_only:
         for row in accepted_rows:
             if row.get("inside_reference_roi") == "true":
                 row["reference_roi_selection_note"] = "object_overlaps_reference_roi_region"
@@ -1738,6 +1822,26 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
         qc_status = rewrite_frame_summary_reference_regions(output, image_stem, reference_regions, accepted_rows, proposals[0] if proposals else None)
         write_roi_proposals_csv(output, image_stem, proposals)
         write_roi_proposals_overlay(output, image_stem, original_image, proposals)
+        return proposals, qc_status
+
+    if reference_roi_only:
+        selected_rows = [row for row in accepted_rows if str(row.get("inside_reference_roi", "")).lower() == "true"]
+        if not selected_rows:
+            selected_rows = accepted_rows
+        for row in accepted_rows:
+            if row in selected_rows:
+                row["selected_for_frame_summary"] = "true"
+                row["auto_roi_selection_note"] = "selected_reference_roi_only_object_candidate"
+                row["reference_roi_selection_note"] = "object_overlaps_reference_roi_region"
+            else:
+                row["auto_roi_selection_note"] = "not_selected_reference_roi_only"
+                row["reference_roi_selection_note"] = "not_selected_outside_reference_roi_region"
+        rewrite_csv_rows(features_path, rows, fieldnames)
+        qc_status = rewrite_frame_summary_selection(output, image_stem, selected_rows, [], None)
+        write_roi_proposals_csv(output, image_stem, proposals)
+        write_roi_proposals_overlay(output, image_stem, original_image, proposals)
+        write_reference_roi_regions_csv(output, image_stem, reference_regions)
+        write_reference_roi_regions_overlay(output, image_stem, original_image, reference_regions)
         return proposals, qc_status
 
     primary_roi = proposals[0] if proposals else None
@@ -1828,8 +1932,8 @@ def apply_auto_roi_selection(output: Path, image_stem: str, original_image: Path
             rewrite_csv_rows(summary_path, summary_rows, summary_fieldnames)
     write_roi_proposals_csv(output, image_stem, proposals)
     write_roi_proposals_overlay(output, image_stem, original_image, proposals)
-    write_reference_roi_regions_csv(output, image_stem, [])
-    write_reference_roi_regions_overlay(output, image_stem, original_image, [])
+    write_reference_roi_regions_csv(output, image_stem, reference_regions)
+    write_reference_roi_regions_overlay(output, image_stem, original_image, reference_regions)
     return proposals, qc_status
 
 
@@ -2073,6 +2177,7 @@ def postprocess_outputs(output: Path, image_stem: str, original_image: Path, par
         write_selected_objects_overlay(output, image_stem, original_image)
         write_selected_contact_sheet(output, image_stem, original_image)
         write_review_candidates_contact_sheet(output, image_stem, original_image)
+    copy_raw_named_aliases(output, image_stem)
     move_internal_outputs(output)
     validate_frame_summary(output)
     validate_cell_feature_table(output)
@@ -2199,6 +2304,8 @@ def write_weka_failure_outputs(output: Path, image: Path, image_stem: str, weka_
 def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, params: dict[str, str], timeout_seconds: int, weka_model: Path | None = None) -> dict[str, str]:
     started = datetime.now()
     fiji_input = prepare_fiji_input(image, output)
+    reference_roi_manifest = prepare_reference_roi_manifest_raw(output, image, project, params)
+    params = {**params, "reference_roi_manifest": str(reference_roi_manifest)}
     if weka_model is not None and not weka_model.exists():
         macro_arg, _ = build_macro_arg(fiji_input, image, output, project, {**params, "weka_model": str(weka_model)})
         write_run_parameters(output, project, image, fiji_input, fiji, macro, macro_arg, {**params, "weka_model": str(weka_model)})
