@@ -1327,13 +1327,103 @@ def validate_dark_reference_roi_border(original_image: Path, x: int, y: int, w: 
     return bool(result.get("accepted")), str(result.get("reason", "")) + ";" + metric_text
 
 
-def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_rows: list[dict[str, str]], image_name: str, frame_id: str, original_image: Path, params: dict[str, str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def reference_candidate_overlap_fraction(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    left = max(ax, bx)
+    top = max(ay, by)
+    right = min(ax + aw, bx + bw)
+    bottom = min(ay + ah, by + bh)
+    if right <= left or bottom <= top:
+        return 0.0
+    intersection = (right - left) * (bottom - top)
+    smaller = max(1, min(aw * ah, bw * bh))
+    return intersection / smaller
+
+
+def detect_dark_rectangle_scan_candidates(original_image: Path) -> list[dict[str, Any]]:
+    from PIL import Image
+
+    with Image.open(original_image) as source:
+        image = source.convert("RGB")
+        width, height = image.size
+        sample_step = max(1, round(max(width, height) / 1800))
+        grid_width = (width + sample_step - 1) // sample_step
+        grid_height = (height + sample_step - 1) // sample_step
+        pixels = image.load()
+        dark_rows: list[bytearray] = []
+        for gy in range(grid_height):
+            y = min(height - 1, gy * sample_step)
+            row = bytearray(grid_width)
+            for gx in range(grid_width):
+                x = min(width - 1, gx * sample_step)
+                if is_dark_annotation_pixel(pixels[x, y]):
+                    row[gx] = 1
+            dark_rows.append(row)
+
+    visited = [bytearray(grid_width) for _ in range(grid_height)]
+    candidates: list[dict[str, Any]] = []
+    component_index = 0
+    for start_y in range(grid_height):
+        for start_x in range(grid_width):
+            if not dark_rows[start_y][start_x] or visited[start_y][start_x]:
+                continue
+            stack = [(start_x, start_y)]
+            visited[start_y][start_x] = 1
+            min_x = max_x = start_x
+            min_y = max_y = start_y
+            dark_count = 0
+            while stack:
+                x, y = stack.pop()
+                dark_count += 1
+                min_x = min(min_x, x); max_x = max(max_x, x)
+                min_y = min(min_y, y); max_y = max(max_y, y)
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if nx < 0 or ny < 0 or nx >= grid_width or ny >= grid_height:
+                        continue
+                    if visited[ny][nx] or not dark_rows[ny][nx]:
+                        continue
+                    visited[ny][nx] = 1
+                    stack.append((nx, ny))
+            bbox_x = min_x * sample_step
+            bbox_y = min_y * sample_step
+            bbox_w = min(width - bbox_x, (max_x - min_x + 1) * sample_step)
+            bbox_h = min(height - bbox_y, (max_y - min_y + 1) * sample_step)
+            if bbox_w < 70 or bbox_h < 70:
+                continue
+            if bbox_w > 0.85 * width or bbox_h > 0.85 * height:
+                continue
+            aspect = bbox_w / max(1, bbox_h)
+            if aspect < 0.20 or aspect > 5.0:
+                continue
+            fill_fraction = dark_count / max(1, (max_x - min_x + 1) * (max_y - min_y + 1))
+            if fill_fraction > 0.45:
+                continue
+            component_index += 1
+            candidates.append({
+                "candidate_source_object_id": f"image_scan_{component_index}",
+                "candidate_source_reason": "image_dark_rectangle_scan",
+                "source_reason": "image_dark_rectangle_scan",
+                "source_object_id": f"image_scan_{component_index}",
+                "candidate_origin": "image_scan",
+                "classification": "image_dark_rectangle_scan",
+                "reject_reason": "image_dark_rectangle_scan",
+                "area_px": dark_count * sample_step * sample_step,
+                "bbox_x": bbox_x,
+                "bbox_y": bbox_y,
+                "bbox_w": bbox_w,
+                "bbox_h": bbox_h,
+            })
+    candidates.sort(key=lambda item: (as_float(str(item.get("bbox_y"))), as_float(str(item.get("bbox_x")))))
+    return candidates
+
+
+def build_reference_roi_candidates(rejected_rows: list[dict[str, str]], original_image: Path) -> list[dict[str, Any]]:
     from PIL import Image
 
     with Image.open(original_image) as source:
         image_width, image_height = source.size
-    regions: list[dict[str, Any]] = []
-    audit_rows: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     for row in rejected_rows:
         classification = str(row.get("classification", "")).strip().lower()
         reject_reason = str(row.get("reject_reason", "")).strip().lower()
@@ -1343,13 +1433,59 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
         w = max(1, round(as_float(row.get("bbox_w") or row.get("bbox_width"), 1)))
         h = max(1, round(as_float(row.get("bbox_h") or row.get("bbox_height"), 1)))
         is_large_aggregate_seed = reject_reason == "reject_large_rectangular_artifact" and area >= 100000 and classification != "border_object"
-        is_manual_reference_box = classification == "border_object" and reject_reason == "reject_border_artifact" and area >= 50000 and w >= 120 and h >= 120 and w < 0.80 * image_width and h < 0.80 * image_height
+        is_manual_reference_box = classification == "border_object" and reject_reason == "reject_border_artifact" and area >= 5000 and w >= 70 and h >= 70 and w < 0.85 * image_width and h < 0.85 * image_height
         if not is_large_aggregate_seed and not is_manual_reference_box:
             continue
         source_reason = "large_rejected_aggregate_roi_seed" if is_large_aggregate_seed else "detected_black_reference_box_border_seed"
+        candidates.append({
+            "candidate_source_object_id": str(row.get("object_id", "")),
+            "candidate_source_reason": source_reason,
+            "source_object_id": str(row.get("object_id", "")),
+            "source_reason": source_reason,
+            "bbox_x": x,
+            "bbox_y": y,
+            "bbox_w": w,
+            "bbox_h": h,
+            "group_name": row.get("group_name", ""),
+            "candidate_origin": "rejected_object",
+            "is_large_aggregate_seed": is_large_aggregate_seed,
+        })
+    for scan_candidate in detect_dark_rectangle_scan_candidates(original_image):
+        scan_bbox = (
+            round(as_float(str(scan_candidate.get("bbox_x")))),
+            round(as_float(str(scan_candidate.get("bbox_y")))),
+            round(as_float(str(scan_candidate.get("bbox_w")))),
+            round(as_float(str(scan_candidate.get("bbox_h")))),
+        )
+        if any(reference_candidate_overlap_fraction(scan_bbox, (
+            round(as_float(str(existing.get("bbox_x")))),
+            round(as_float(str(existing.get("bbox_y")))),
+            round(as_float(str(existing.get("bbox_w")))),
+            round(as_float(str(existing.get("bbox_h")))),
+        )) >= 0.70 for existing in candidates):
+            continue
+        candidates.append(scan_candidate)
+    candidates.sort(key=lambda item: (0 if item.get("candidate_origin") == "rejected_object" else 1, as_float(str(item.get("bbox_y"))), as_float(str(item.get("bbox_x")))))
+    return candidates
+
+
+def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_rows: list[dict[str, str]], image_name: str, frame_id: str, original_image: Path, params: dict[str, str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    regions: list[dict[str, Any]] = []
+    audit_rows: list[dict[str, Any]] = []
+    accepted_bboxes: list[tuple[int, int, int, int]] = []
+    accepted_rejected_candidate_count = 0
+    for candidate in build_reference_roi_candidates(rejected_rows, original_image):
+        if candidate.get("candidate_origin") == "image_scan" and accepted_rejected_candidate_count >= 3:
+            continue
+        x = round(as_float(str(candidate.get("bbox_x"))))
+        y = round(as_float(str(candidate.get("bbox_y"))))
+        w = max(1, round(as_float(str(candidate.get("bbox_w")), 1)))
+        h = max(1, round(as_float(str(candidate.get("bbox_h")), 1)))
+        source_reason = str(candidate.get("source_reason", candidate.get("candidate_source_reason", "")))
+        source_object_id = str(candidate.get("source_object_id", candidate.get("candidate_source_object_id", "")))
         border_result = search_dark_reference_roi_border(original_image, x, y, w, h)
         audit_row = {
-            "candidate_source_object_id": str(row.get("object_id", "")),
+            "candidate_source_object_id": source_object_id,
             "candidate_source_reason": source_reason,
             "candidate_bbox_x": x,
             "candidate_bbox_y": y,
@@ -1361,6 +1497,12 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
         if not border_result.get("accepted"):
             continue
         detected_x, detected_y, detected_w, detected_h = border_result.get("detected_bbox", (x, y, w, h))
+        detected_bbox = (detected_x, detected_y, detected_w, detected_h)
+        if any(reference_candidate_overlap_fraction(detected_bbox, existing_bbox) >= 0.70 for existing_bbox in accepted_bboxes):
+            continue
+        accepted_bboxes.append(detected_bbox)
+        if candidate.get("candidate_origin") == "rejected_object":
+            accepted_rejected_candidate_count += 1
         margin = max(8, min(28, round(min(detected_w, detected_h) * 0.04)))
         inner_x = detected_x + margin
         inner_y = detected_y + margin
@@ -1368,9 +1510,14 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
         inner_h = max(1, detected_h - 2 * margin)
         reference_roi_id = f"{frame_id}_reference_roi_{len(regions) + 1}"
         measurement = measure_reference_roi_pixels(original_image, inner_x, inner_y, inner_w, inner_h, params)
+        review_note_prefix = "reference_roi_region_from_image_dark_rectangle_scan"
+        if source_reason == "large_rejected_aggregate_roi_seed":
+            review_note_prefix = "reference_roi_region_from_large_aggregate_seed"
+        elif source_reason == "detected_black_reference_box_border_seed":
+            review_note_prefix = "reference_roi_region_from_detected_black_box"
         region = {
             "image_name": image_name,
-            "group_name": row.get("group_name", ""),
+            "group_name": str(candidate.get("group_name", "")),
             "original_long_path": str(original_image),
             "short_path_used": "",
             "frame_id": frame_id,
@@ -1381,7 +1528,7 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
             "accepted_status": "accepted_reference_roi_region",
             "selected_for_frame_summary": "true",
             "selection_unit_type": "reference_roi_regions",
-            "source_object_id": str(row.get("object_id", "")),
+            "source_object_id": source_object_id,
             "source_reason": source_reason,
             "roi_bbox_x": detected_x,
             "roi_bbox_y": detected_y,
@@ -1391,7 +1538,7 @@ def derive_reference_roi_regions(rejected_rows: list[dict[str, str]], accepted_r
             "roi_inner_y": inner_y,
             "roi_inner_w": inner_w,
             "roi_inner_h": inner_h,
-            "roi_review_note": ("reference_roi_region_from_large_aggregate_seed" if is_large_aggregate_seed else "reference_roi_region_from_detected_black_box") + ";" + str(border_result.get("reason", "")),
+            "roi_review_note": review_note_prefix + ";" + str(border_result.get("reason", "")),
         }
         region.update(measurement)
         regions.append(region)
