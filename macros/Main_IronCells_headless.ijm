@@ -56,6 +56,7 @@ maxStableAcceptedObjects = parseFloat(getArgString(arg, "max_stable_accepted_obj
 minStableAcceptedPixels = parseFloat(getArgString(arg, "min_stable_accepted_pixels", "500"));
 frameSelectTopSize = parseFloat(getArgString(arg, "frame_select_top_size", "40"));
 frameSelectTopBlue = parseFloat(getArgString(arg, "frame_select_top_blue", "20"));
+frameSelectMaxNearFullBlue = parseFloat(getArgString(arg, "frame_select_max_near_full_blue", "5"));
 
 File.makeDirectory(outputDir);
 logPath = outputDir + "/macro_log.txt";
@@ -283,13 +284,14 @@ File.saveString("component_id,area_px,centroid_x,centroid_y,bbox_x,bbox_y,bbox_w
 rejectedCsv = outputDir + "/rejected_objects.csv";
 File.saveString("image_name,group_name,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,classification,reject_reason,area_px,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,touches_border,roi_reconstruction_status\n", rejectedCsv);
 objectCsv = outputDir + "/cell_features.csv";
-cellFeatureHeader = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n";
+cellFeatureHeader = "image_name,group_name,original_long_path,short_path_used,frame_id,object_id,feature_row_id,candidate_status,accepted_status,selected_for_frame_summary,reject_reason,selection_rank_size,selection_rank_blue,selection_score,selection_penalty_full_blue,warn_full_blue_candidate,selection_review_note,object_type,roi_area_pixels,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent,bbox_x,bbox_y,bbox_w,bbox_h,bbox_width,bbox_height,centroid_x,centroid_y,aspect_ratio,R_mean,G_mean,B_mean,R_std,G_std,B_std,R_min,G_min,B_min,R_max,G_max,B_max,R_div_G,B_div_R,B_div_RGB_sum,intensity_mean,intensity_std,intensity_min,intensity_max,cell_material_area_px,roi_area_reconstructed,roi_area_delta_percent,roi_reconstruction_status\n";
 File.saveString(cellFeatureHeader, objectCsv);
 blueCsv = outputDir + "/blue_pixels_features.csv";
 File.saveString("image_name,group_name,object_type,object_id,object_pixels,blue_pixels,blue_pixel_fraction,blue_pixel_percent\n", blueCsv);
 acceptedFlags = newArray(nObjects); selectedFlags = newArray(nObjects);
 objectPixelsForSelection = newArray(nObjects); bluePixelsForSelection = newArray(nObjects); blueFractionForSelection = newArray(nObjects);
-sizeRankForSelection = newArray(nObjects); blueRankForSelection = newArray(nObjects); objectBaseLines = newArray(nObjects);
+sizeRankForSelection = newArray(nObjects); blueRankForSelection = newArray(nObjects); selectionScoreForSelection = newArray(nObjects);
+fullBluePenaltyForSelection = newArray(nObjects); fullBlueWarnForSelection = newArray(nObjects); selectionNoteForSelection = newArray(nObjects); objectBaseLines = newArray(nObjects);
 
 if (saveOverlays == 1) {
     checkpoint("before_overlay_setup");
@@ -335,7 +337,7 @@ for (i = 0; i < nObjects; i++) {
 
     File.append((i+1) + "," + d2s(area,0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "\n", allCsv);
 
-    roiStatus = "not_attempted"; roiArea = 0; roiDelta = 100; meanR = 0; meanG = 0; meanB = 0; stdR = 0; stdG = 0; stdB = 0; minR = 0; minG = 0; minB = 0; maxR = 0; maxG = 0; maxB = 0; grayMean = 0; grayStd = 0; grayMin = 0; grayMax = 0; objectPixels = 0; bluePixels = 0; roiAreaPixels = round(bws[i]) * round(bhs[i]);
+    roiStatus = "not_attempted"; roiArea = 0; roiDelta = 100; selectionPenaltyFullBlue = 0; warnFullBlueCandidate = 0; selectionReviewNote = ""; meanR = 0; meanG = 0; meanB = 0; stdR = 0; stdG = 0; stdB = 0; minR = 0; minG = 0; minB = 0; maxR = 0; maxG = 0; maxB = 0; grayMean = 0; grayStd = 0; grayMin = 0; grayMax = 0; objectPixels = 0; bluePixels = 0; roiAreaPixels = round(bws[i]) * round(bhs[i]);
     selectWindow(cellMaskTitle);
     recoverObjectRoi(xs[i], ys[i], bxs[i], bys[i], bws[i], bhs[i]);
     if (selectionType() == -1) {
@@ -399,6 +401,21 @@ for (i = 0; i < nObjects; i++) {
         objectPixelsForSelection[i] = objectPixels;
         bluePixelsForSelection[i] = bluePixels;
         blueFractionForSelection[i] = fraction;
+        fullBluePlausible = biologicallyPlausibleFullBlue(objectPixels, bws[i], bhs[i], aspect, fillRatio, grayStd);
+        if (fraction >= 0.99) {
+            warnFullBlueCandidate = 1;
+            selectionReviewNote = "warn_nearly_full_blue_candidate";
+            if (fullBluePlausible == 0) {
+                selectionPenaltyFullBlue = 10000;
+                selectionReviewNote = "strongly_deprioritized_nearly_full_blue_artifact_risk";
+            } else {
+                selectionPenaltyFullBlue = 250;
+                selectionReviewNote = "deprioritized_nearly_full_blue_size_shape_plausible";
+            }
+        }
+        fullBluePenaltyForSelection[i] = selectionPenaltyFullBlue;
+        fullBlueWarnForSelection[i] = warnFullBlueCandidate;
+        selectionNoteForSelection[i] = selectionReviewNote;
         objectBaseLines[i] = objectType + "," + d2s(roiAreaPixels,0) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + d2s(meanR,3) + "," + d2s(meanG,3) + "," + d2s(meanB,3) + "," + d2s(stdR,3) + "," + d2s(stdG,3) + "," + d2s(stdB,3) + "," + d2s(minR,0) + "," + d2s(minG,0) + "," + d2s(minB,0) + "," + d2s(maxR,0) + "," + d2s(maxG,0) + "," + d2s(maxB,0) + "," + d2s(rOverG,6) + "," + d2s(bOverR,6) + "," + d2s(bOverRgbSum,6) + "," + d2s(grayMean,3) + "," + d2s(grayStd,3) + "," + d2s(grayMin,0) + "," + d2s(grayMax,0) + "," + d2s(area,2) + "," + d2s(roiArea,2) + "," + d2s(roiDelta,3) + "," + roiStatus;
         File.append(originalFileName + "," + groupName + "," + objectType + "," + (i+1) + "," + d2s(objectPixels,0) + "," + d2s(bluePixels,0) + "," + d2s(fraction,8) + "," + d2s(100*fraction,4) + "\n", blueCsv);
         if (saveOverlays == 1) {
@@ -425,7 +442,7 @@ for (i = 0; i < nObjects; i++) {
     }
 }
 
-selectedCount = 0; selectedObjectPixels = 0; selectedBluePixels = 0; selectedObjectIds = "";
+selectedCount = 0; selectedNearFullBlueCount = 0; selectedObjectPixels = 0; selectedBluePixels = 0; selectedObjectIds = "";
 for (i = 0; i < nObjects; i++) {
     if (acceptedFlags[i] == 1) {
         rankSize = 1;
@@ -443,16 +460,51 @@ for (i = 0; i < nObjects; i++) {
         rankBlue = 1;
         for (j = 0; j < nObjects; j++) {
             if (acceptedFlags[j] == 1 && sizeRankForSelection[j] <= frameSelectTopSize) {
-                if (blueFractionForSelection[j] > blueFractionForSelection[i]) rankBlue++;
-                if (blueFractionForSelection[j] == blueFractionForSelection[i] && j < i) rankBlue++;
+                scoreJ = fullBluePenaltyForSelection[j] + (1 - blueFractionForSelection[j]);
+                scoreI = fullBluePenaltyForSelection[i] + (1 - blueFractionForSelection[i]);
+                if (scoreJ < scoreI) rankBlue++;
+                if (scoreJ == scoreI && sizeRankForSelection[j] < sizeRankForSelection[i]) rankBlue++;
+                if (scoreJ == scoreI && sizeRankForSelection[j] == sizeRankForSelection[i] && j < i) rankBlue++;
             }
         }
         blueRankForSelection[i] = rankBlue;
-        if (sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] <= frameSelectTopBlue) {
+        selectionScoreForSelection[i] = sizeRankForSelection[i] * 10000 + rankBlue + fullBluePenaltyForSelection[i];
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget && blueFractionForSelection[i] < 0.99) {
             selectedFlags[i] = 1;
             selectedCount++;
             selectedObjectPixels += objectPixelsForSelection[i];
             selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
+        }
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && selectedCount < frameSelectTopBlue && selectedNearFullBlueCount < frameSelectMaxNearFullBlue && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget && blueFractionForSelection[i] >= 0.99) {
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
+            if (selectedObjectIds != "") selectedObjectIds += "|";
+            selectedObjectIds += "" + (i + 1);
+        }
+    }
+}
+for (rankTarget = 1; rankTarget <= frameSelectTopBlue; rankTarget++) {
+    for (i = 0; i < nObjects; i++) {
+        if (acceptedFlags[i] == 1 && selectedFlags[i] == 0 && selectedCount < frameSelectTopBlue && sizeRankForSelection[i] <= frameSelectTopSize && blueRankForSelection[i] == rankTarget) {
+            selectedFlags[i] = 1;
+            selectedCount++;
+            selectedObjectPixels += objectPixelsForSelection[i];
+            selectedBluePixels += bluePixelsForSelection[i];
+            if (blueFractionForSelection[i] >= 0.99) selectedNearFullBlueCount++;
             if (selectedObjectIds != "") selectedObjectIds += "|";
             selectedObjectIds += "" + (i + 1);
         }
@@ -465,7 +517,7 @@ if (saveOverlays == 1) {
 }
 for (i = 0; i < nObjects; i++) {
     if (acceptedFlags[i] == 1) {
-        File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + frameId + "," + (i+1) + "," + frameId + "_object_" + (i+1) + ",weka_candidate,accepted_cell_candidate," + boolText(selectedFlags[i]) + ",," + d2s(sizeRankForSelection[i],0) + "," + d2s(blueRankForSelection[i],0) + "," + objectBaseLines[i] + "\n", objectCsv);
+        File.append(originalFileName + "," + groupName + "," + originalLongPath + "," + shortPathUsed + "," + frameId + "," + (i+1) + "," + frameId + "_object_" + (i+1) + ",weka_candidate,accepted_cell_candidate," + boolText(selectedFlags[i]) + ",," + d2s(sizeRankForSelection[i],0) + "," + d2s(blueRankForSelection[i],0) + "," + d2s(selectionScoreForSelection[i],3) + "," + d2s(fullBluePenaltyForSelection[i],3) + "," + boolText(fullBlueWarnForSelection[i]) + "," + selectionNoteForSelection[i] + "," + objectBaseLines[i] + "\n", objectCsv);
     }
 }
 checkpoint("after_per_object_loop");
@@ -575,6 +627,7 @@ if (roiWarningCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_ROI_RECONSTRU
 if (lowAcceptedAreaWarning == 1) qcStatus = appendQcStatus(qcStatus, "WARN_LOW_ACCEPTED_AREA");
 if (acceptedCount > maxStableAcceptedObjects) qcStatus = appendQcStatus(qcStatus, "WARN_HIGH_ACCEPTED_OBJECT_COUNT");
 if (acceptedCount > 0) { if (blueFullCount / acceptedCount > 0.25) qcStatus = appendQcStatus(qcStatus, "WARN_MANY_FULL_BLUE_OBJECTS"); }
+if (selectedNearFullBlueCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE");
 if (borderCount > 0) qcStatus = appendQcStatus(qcStatus, "WARN_BORDER_ARTIFACTS_REMOVED");
 if (nObjects > 0) { if ((tooSmallCount + tooLongCount) / nObjects > 0.50) qcStatus = appendQcStatus(qcStatus, "WARN_MANY_REJECTED_ARTIFACTS"); }
 
@@ -661,6 +714,7 @@ function drawReviewObjectOverlay(id, classification, fraction, bx, by, bw, bh) {
     run("Select None");
 }
 
+
 function drawSelectedObjectOverlay(id, bx, by, bw, bh) {
     requireWindow("SelectedObjectsOverlay");
     rectX = clampFloor(bx, 0, width - 1);
@@ -740,6 +794,14 @@ function rejectReasonFor(classification, area) {
     if (classification == "rectangle_or_line_artifact") return "reject_line_or_frame_artifact";
     if (classification == "too_large_artifact") return "reject_large_rectangular_artifact";
     return "reject_" + classification;
+}
+
+function biologicallyPlausibleFullBlue(objectPixels, bw, bh, aspect, fillRatio, grayStd) {
+    longSide = maxOf(bw, bh);
+    shortSide = maxOf(1, minOf(bw, bh));
+    if (objectPixels <= maxSingleCellArea && aspect <= maxSingleCellAspect && fillRatio >= 0.18 && fillRatio <= 0.82) return 1;
+    if (objectPixels <= 2 * maxSingleCellArea && aspect <= maxAggregateAspect && fillRatio >= 0.18 && fillRatio <= 0.70 && shortSide >= 8) return 1;
+    return 0;
 }
 
 function postFilterRejectReason(objectPixels, roiAreaPixels, bw, bh, aspect, fillRatio, touchesBorder, fraction) {
@@ -858,12 +920,18 @@ function writeQcReport(qcStatus) {
         if (acceptedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_ACCEPTED_OBJECT_COUNT: fewer accepted objects than the minimum expected count.\n";
         if (selectedCount < minExpectedAcceptedObjects) report += "- WARN_LOW_SELECTED_FRAME_OBJECT_COUNT: fewer selected frame-summary objects than the minimum expected count.\n";
         if (roiWarningCount > 0) report += "- WARN_ROI_RECONSTRUCTION: one or more objects had ROI reconstruction warnings and were excluded from final accepted summary.\n";
+        if (selectedNearFullBlueCount > 0) report += "- WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE: selected frame-summary objects still include near-full-blue candidates; review selected overlays/contact sheets before biological interpretation.\n";
         if (lowAcceptedAreaWarning == 1) report += "- WARN_LOW_ACCEPTED_AREA: accepted object count or accepted object pixels are low; frame-level blue percent can be unstable and should be interpreted cautiously.\n";
         report += "\n";
     }
     report += "## Notes\n\n";
     report += "The measured feature is preliminary relative optical blue_pixel_fraction, not a calibrated concentration measurement.\n";
     report += "Bounding boxes are loop limits only; pixel membership is checked through selectionContains(x,y).\n";
+    report += "Weka is treated as a cell-material candidate generator; blue pixels are measured only inside accepted cell-material regions and near-full-blue candidates are penalized unless size/shape context is plausible.\n";
+    if (indexOf(qcStatus, "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE") >= 0 || indexOf(qcStatus, "WARN_MANY_FULL_BLUE_OBJECTS") >= 0 || indexOf(qcStatus, "WARN_HIGH_ACCEPTED_OBJECT_COUNT") >= 0) {
+        report += "Biological interpretation requires reviewer validation using selection_review_candidates_<image_stem>.csv and review_candidates_contact_sheet_<image_stem>.jpg before batch analysis.\n";
+        report += "Suggested review_label values: include_cell_material, include_aggregate, exclude_blue_background, exclude_full_blue_artifact, exclude_border_or_metadata, exclude_noise, uncertain.\n";
+    }
     if (acceptedCount == 0) report += "This run is a detector/QC failure, not a successful biological Stage 1A result; use the generated files only for debugging and Stage 1B detector planning.\n";
     File.saveString(report, outputDir + "/extended_qc_report.md");
 }
