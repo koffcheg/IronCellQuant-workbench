@@ -175,3 +175,91 @@ Immediate next debugging target:
 - keep output minimal until the segmentation profile is stable.
 
 Do not run full-directory batch processing until the single-image pipeline produces a visually acceptable `final_analysis_overlay.tif`.
+
+## PCA Analysis
+
+The PCA module is independent from Fiji/ImageJ and from the current image-processing macro. It consumes an already prepared universal FeatureMatrix CSV and writes PCA tables, plots, reports, metadata, and a serialized model. The current Fiji macro is not a required data source for PCA.
+
+Install Python dependencies before running PCA:
+
+```powershell
+pip install -r requirements.txt
+```
+
+Input format:
+
+- one row per analysed object (`object x features`);
+- service columns are required: `image_name`, `object_type`, `object_id`;
+- all non-service numeric columns are treated as candidate features unless excluded by config;
+- at least 2 objects/rows and at least 2 numeric PCA features are required;
+- empty/blank CSV lines are ignored during validation, but non-empty rows must have the same number of fields as the header;
+- the module does not estimate or report actual iron concentration.
+
+Run with defaults:
+
+```powershell
+python .\run_pca.py --input .\FeatureMatrix.csv --output .\output\pca_run
+```
+
+or, if a combined matrix was produced by another workflow:
+
+```powershell
+python .\run_pca.py --input .\output\combined_feature_matrix.csv --output .\output\pca_run
+```
+
+Run with a JSON config:
+
+```powershell
+python .\run_pca.py --input .\FeatureMatrix.csv --output .\output\pca_run --config .\pca_config.json
+```
+
+Frame-level CSV files can be used only when they form a real multi-row feature matrix, for example after combining several frames/runs into one CSV. A single-row run summary is not sufficient for PCA.
+
+Common config fields include:
+
+```json
+{
+  "target_feature": "blue_pixel_percent",
+  "color_feature": "blue_pixel_percent",
+  "scatter_component_x": "PC1",
+  "scatter_component_y": "PC2",
+  "top_feature_count": 10,
+  "explained_variance_plot_max_components": 15,
+  "biplot_label_mode": "numbered_legend",
+  "biplot_top_feature_count": 15,
+  "biplot_legend_include_loadings": true,
+  "biplot_save_direct_label_debug_plot": false,
+  "delivery_export_enabled": false,
+  "pca_component_count": 0
+}
+```
+
+Primary output files:
+
+- `Data_Check_Report.txt`
+- `Standardized_Features.csv`
+- `Feature_Preprocessing_Report.txt`
+- `PCA_Summary.csv`
+- `PCA_Loadings.csv`
+- `PCA_Scores.csv`
+- `PCA_TopFeatures.csv`
+- `PCA_Correlation_With_BluePixel.csv`
+- `PCA_Scatter_PC1_PC2.png` by default, or `PCA_Scatter_<PCX>_<PCY>.png` for a configured component pair such as `PCA_Scatter_PC1_PC3.png`
+- `PCA_Biplot_PC1_PC2.png`
+- `PCA_ExplainedVariance.png`
+- `PCA_Loadings_PC1.png`
+- `PCA_Loadings_PC2.png`
+- `PCA_Loadings_PC3.png` when PC3 exists
+- `PCA_Report.txt`
+- `PCA_Run_Metadata.json`
+- `PCA_Model.joblib`
+
+`PCA_Scores.csv` stores object coordinates in principal-component space. `PCA_Loadings.csv` stores feature loadings used to interpret components. `PCA_TopFeatures.csv` ranks the strongest contributors per component. `PCA_Correlation_With_BluePixel.csv` summarizes statistical association with `blue_pixel_percent`; it is not a calibrated measurement of iron concentration.
+
+When `exclude_target_from_pca=true`, `target_feature` is excluded only from the PCA feature matrix and loadings. The raw target remains available for correlation analysis, scatter coloring, reports, and metadata when it exists and can be converted to numeric. Scatter color values for `blue_pixel_percent` use raw/original numeric values, not standardized z-scores.
+
+`PCA_Biplot_PC1_PC2.png` uses `biplot_label_mode="numbered_legend"` by default. In that mode, arrows stay on the biplot, arrow ends show compact numbers, and the full feature names are listed in a right-side legend/table to avoid overlapping text. `biplot_label_mode="direct_labels"` writes feature names directly beside the arrows, and `biplot_label_mode="none"` writes arrows without labels. Set `biplot_save_direct_label_debug_plot=true` to also write `PCA_Biplot_PC1_PC2_labeled.png` as a direct-label debug artifact.
+
+`PCA_ExplainedVariance.png` is optimized for readability and may show only the first `explained_variance_plot_max_components` components. The full component table always remains in `PCA_Summary.csv`.
+
+Optional delivery copies can be enabled with `delivery_export_enabled=true`. This creates input-name-based human-readable copies in `delivery_named_outputs` by default, or in `delivery_export_dir` when provided. These copies do not replace the standard PCA filenames above; the standard names remain the primary output contract.
