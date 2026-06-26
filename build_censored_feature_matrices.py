@@ -35,12 +35,22 @@ FRAME_SERVICE_COLUMNS = [
     "feature_row_id",
     "object_type",
     "object_id",
+    "cell_count",
+    "object_pixels",
+    "blue_pixels",
+    "blue_pixel_fraction",
+    "blue_pixel_percent",
+    "aggregation_scope",
+    "source_object_set",
+]
+
+LEGACY_SELECTED_MEASUREMENT_COLUMNS = {
     "selected_cell_count",
     "selected_object_pixels",
     "selected_blue_pixels",
     "selected_blue_pixel_fraction",
     "selected_blue_pixel_percent",
-]
+}
 
 CELL_PREFIX = "cell_features_censored_"
 FRAME_PREFIX = "frame_features_censored_"
@@ -60,8 +70,13 @@ AUDIT_STATUS_COLUMNS = {
     "roi_reconstruction_status",
     "selected_for_censored_frame",
     "selected_for_frame_summary",
+    "selection_penalty_full_blue",
+    "selection_rank_blue",
+    "selection_rank_size",
     "selection_review_note",
+    "selection_score",
     "stage_trace",
+    "warn_full_blue_candidate",
 }
 
 CELL_AUDIT_ONLY_COLUMNS = {
@@ -297,6 +312,44 @@ def check_display_labels(rows: list[dict[str, str]]) -> tuple[bool, str]:
     return True, "no duplicated display_label within frame_id"
 
 
+def check_frame_aggregates(cell_rows: list[dict[str, str]], frame_rows: list[dict[str, str]]) -> tuple[bool, str]:
+    tolerance = 1e-6
+    cells_by_frame: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in cell_rows:
+        cells_by_frame[str(row.get("frame_id", "")).strip()].append(row)
+
+    mismatches: list[str] = []
+    for frame_row in frame_rows:
+        frame_id = str(frame_row.get("frame_id", "")).strip()
+        selected_cells = cells_by_frame.get(frame_id, [])
+        expected_object_pixels = sum(as_float(row.get("object_pixels")) or 0.0 for row in selected_cells)
+        expected_blue_pixels = sum(as_float(row.get("blue_pixels")) or 0.0 for row in selected_cells)
+        expected_fraction = expected_blue_pixels / expected_object_pixels if expected_object_pixels else 0.0
+        expected = {
+            "cell_count": float(len(selected_cells)),
+            "object_pixels": expected_object_pixels,
+            "blue_pixels": expected_blue_pixels,
+            "blue_pixel_fraction": expected_fraction,
+            "blue_pixel_percent": 100.0 * expected_fraction,
+        }
+        for column, expected_value in expected.items():
+            actual_value = as_float(frame_row.get(column))
+            if actual_value is None:
+                mismatches.append(
+                    f"frame_id={frame_id}; column={column}; expected={expected_value}; actual=<missing>; abs_diff=<missing>"
+                )
+                continue
+            diff = abs(actual_value - expected_value)
+            if diff > tolerance:
+                mismatches.append(
+                    f"frame_id={frame_id}; column={column}; expected={expected_value}; actual={actual_value}; abs_diff={diff}"
+                )
+
+    if mismatches:
+        return False, "; ".join(mismatches[:20])
+    return True, f"checked {len(frame_rows)} frame row(s) against selected censored cell rows"
+
+
 def validate_export(
     cell_rows: list[dict[str, str]],
     frame_rows: list[dict[str, str]],
@@ -377,6 +430,18 @@ def validate_export(
 
     passed, detail = check_display_labels(cell_rows)
     checks.append(ValidationCheck("display_label not duplicated within frame_id", passed, detail))
+
+    legacy_frame_measurements = sorted(LEGACY_SELECTED_MEASUREMENT_COLUMNS & set(frame_fieldnames))
+    checks.append(
+        ValidationCheck(
+            "legacy selected_* frame measurement columns absent",
+            not legacy_frame_measurements,
+            f"legacy_columns={legacy_frame_measurements}",
+        )
+    )
+
+    passed, detail = check_frame_aggregates(cell_rows, frame_rows)
+    checks.append(ValidationCheck("frame aggregate matches selected censored cell rows", passed, detail))
 
     false_rows = [
         str(row.get("feature_row_id", "")).strip()
@@ -483,6 +548,18 @@ def write_report(
         "## Frame Numeric Measurement Feature Columns",
         "",
         markdown_list(frame_measurement),
+        "",
+        "## Public Measurement Schema Synchronization",
+        "",
+        "Public measurement column names were synchronized between cell-level and frame-level outputs.",
+        "",
+        "The aggregation formulas were not changed.",
+        "",
+        "For frame-level rows, `object_pixels`, `blue_pixels`, `blue_pixel_fraction`, and `blue_pixel_percent` describe censored selected cell material of the frame.",
+        "",
+        "The selected/censored semantics are represented by `object_type = censored_frame_cell_material`, `aggregation_scope = censored_selected_objects`, and `source_object_set = selected_censored_objects`.",
+        "",
+        "Audit/status fields still keep selected terminology: `selected_for_censored_frame` and `censoring_status`.",
         "",
         "## Excluded Audit/Status/Context Columns",
         "",

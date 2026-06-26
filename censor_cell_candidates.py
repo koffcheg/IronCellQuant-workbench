@@ -60,11 +60,13 @@ FRAME_COLUMNS = [
     "frame_id",
     "object_id",
     "object_type",
-    "selected_cell_count",
-    "selected_object_pixels",
-    "selected_blue_pixels",
-    "selected_blue_pixel_fraction",
-    "selected_blue_pixel_percent",
+    "cell_count",
+    "object_pixels",
+    "blue_pixels",
+    "blue_pixel_fraction",
+    "blue_pixel_percent",
+    "aggregation_scope",
+    "source_object_set",
     "censoring_frame_status",
 ]
 
@@ -405,11 +407,13 @@ def build_frame_row(selected: list[dict[str, str]], all_rows: list[dict[str, str
         "frame_id": frame_id,
         "object_id": "frame",
         "object_type": "censored_frame_cell_material",
-        "selected_cell_count": len(selected),
-        "selected_object_pixels": object_pixels,
-        "selected_blue_pixels": blue_pixels,
-        "selected_blue_pixel_fraction": fraction,
-        "selected_blue_pixel_percent": 100.0 * fraction,
+        "cell_count": len(selected),
+        "object_pixels": object_pixels,
+        "blue_pixels": blue_pixels,
+        "blue_pixel_fraction": fraction,
+        "blue_pixel_percent": 100.0 * fraction,
+        "aggregation_scope": "censored_selected_objects",
+        "source_object_set": "selected_censored_objects",
         "censoring_frame_status": "PASS" if selected else "FAIL_NO_CENSORED_OBJECTS",
     }
     add_weighted_columns(row, selected)
@@ -433,12 +437,12 @@ def add_weighted_columns(frame_row: dict[str, Any], rows: list[dict[str, str]]) 
         if not weighted_values:
             continue
         weighted_mean = sum(mean * weight for mean, _, weight in weighted_values) / sum(weight for _, _, weight in weighted_values)
-        frame_row[f"selected_weighted_{mean_column}"] = weighted_mean
+        frame_row[f"weighted_{mean_column}"] = weighted_mean
         if std_column in columns:
             second_moment = sum((((std or 0.0) ** 2) + mean**2) * weight for mean, std, weight in weighted_values)
             second_moment /= sum(weight for _, _, weight in weighted_values)
             variance = max(0.0, second_moment - weighted_mean**2)
-            frame_row[f"selected_weighted_{std_column}"] = math.sqrt(variance)
+            frame_row[f"weighted_{std_column}"] = math.sqrt(variance)
 
 
 def write_blue_table(path: Path, selected: list[dict[str, str]], config: dict[str, Any]) -> None:
