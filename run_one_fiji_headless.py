@@ -1012,6 +1012,10 @@ def write_roi_proposals_overlay(output: Path, image_stem: str, original_image: P
     with Image.open(original_image) as source:
         image = source.convert("RGB")
     draw = ImageDraw.Draw(image)
+    if read_selection_unit_type(output, image_stem) == "reference_roi_regions":
+        title = "DIAGNOSTIC AUTO ROI PROPOSALS - NOT FINAL SELECTION"
+        draw.rectangle((0, 0, min(image.width, 760), 34), fill=(255, 255, 255))
+        draw.text((10, 10), title, fill=(180, 0, 180))
     for proposal in proposals:
         x = int(proposal["roi_bbox_x"])
         y = int(proposal["roi_bbox_y"])
@@ -1742,41 +1746,80 @@ def write_selection_review_candidates(output: Path, image_stem: str) -> None:
     validate_public_metadata(review_path)
 
 
-def append_auto_roi_qc_report(output: Path, proposals: list[dict[str, Any]], qc_status: str) -> None:
+def append_auto_roi_qc_report(output: Path, image_stem: str, proposals: list[dict[str, Any]], qc_status: str) -> None:
     report_path = output / "extended_qc_report.md"
     if not report_path.exists():
         return
-    lines = [
-        "\n## Auto ROI proposal review\n\n",
-        f"- auto_roi_proposal_count: {len(proposals)}\n",
-        f"- selected_objects_constrained_to_auto_roi: {'true' if proposals else 'false'}\n",
-        f"- final_qc_status: {qc_status}\n",
-        f"- primary_auto_roi_id: {proposals[0].get('roi_id', '') if proposals else ''}\n",
-        f"- primary_auto_roi_reason: {proposals[0].get('roi_review_note', '') if proposals else ''}\n",
-        "- selected overlay/contact sheet are regenerated from the final postprocessed selected_for_frame_summary flags.\n",
-    ]
-    large_seed_count = sum(1 for proposal in proposals if proposal.get("roi_review_note") == "roi_seed_large_aggregate_candidate")
-    lines.append(f"- large_aggregate_roi_seed_proposal_count: {large_seed_count}\n")
-    lines.append("- near-full-blue selected objects are capped by frame_select_max_near_full_blue; remaining slots are left unfilled rather than backfilled with full-blue candidates.\n")
-    if not proposals:
-        lines.append("- WARN_NO_AUTO_ROI_PROPOSALS: no deterministic accepted-candidate clusters met ROI proposal criteria; frame-summary selection used full-frame fallback.\n")
-    if "WARN_SELECTED_OUTSIDE_AUTO_ROI" in qc_status:
-        lines.append("- WARN_SELECTED_OUTSIDE_AUTO_ROI: one or more selected objects were not inside an auto ROI proposal.\n")
-    lines.append("- Black rectangular boxes, when present, are optional reference guides only; auto ROI proposals are derived from accepted Weka/postfilter cell-material candidates.\n")
-    summary_path = output / next((path.name for path in output.glob("frame_features_*.csv")), "")
+    summary_path = output / f"frame_features_{image_stem}.csv"
+    summary_row: dict[str, str] = {}
     if summary_path.exists():
         with summary_path.open("r", encoding="utf-8-sig", newline="") as f:
             summary_rows = list(csv.DictReader(f))
-        if summary_rows and summary_rows[0].get("selection_unit_type") == "reference_roi_regions":
-            row = summary_rows[0]
-            lines.extend([
-                "\n## Reference ROI region summary\n\n",
-                f"- selected_reference_roi_ids: {row.get('selected_reference_roi_ids', '')}\n",
-                f"- selected_reference_roi_pixels: {row.get('selected_reference_roi_pixels', '')}\n",
-                f"- selected_reference_roi_blue_pixels: {row.get('selected_reference_roi_blue_pixels', '')}\n",
-                f"- selected_reference_roi_blue_pixel_percent: {row.get('selected_reference_roi_blue_pixel_percent', '')}\n",
-                "- ROI-region mode measures blue directly inside the inner ROI rectangle using the standard blue formula: B > blue_min, B > R + blue_over_red, and B > G + blue_over_green.\n",
-            ])
+        summary_row = summary_rows[0] if summary_rows else {}
+    selection_unit_type = summary_row.get("selection_unit_type", "object_candidates")
+    removed_candidate_warning = False
+    if selection_unit_type == "reference_roi_regions":
+        original_lines = report_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        filtered_lines = [line for line in original_lines if "WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE" not in line]
+        removed_candidate_warning = len(filtered_lines) != len(original_lines)
+        if removed_candidate_warning:
+            report_path.write_text("".join(filtered_lines), encoding="utf-8")
+
+    lines = [
+        "\n## Final selection summary\n\n",
+        f"- selection_unit_type: {selection_unit_type}\n",
+        f"- selected_reference_roi_count: {summary_row.get('selected_reference_roi_count', '')}\n",
+        f"- selected_reference_roi_ids: {summary_row.get('selected_reference_roi_ids', '')}\n",
+        f"- selected_reference_roi_pixels: {summary_row.get('selected_reference_roi_pixels', '')}\n",
+        f"- selected_reference_roi_blue_pixels: {summary_row.get('selected_reference_roi_blue_pixels', '')}\n",
+        f"- selected_reference_roi_blue_pixel_percent: {summary_row.get('selected_reference_roi_blue_pixel_percent', '')}\n",
+        f"- final_qc_status: {summary_row.get('qc_status', qc_status)}\n",
+    ]
+    if selection_unit_type == "reference_roi_regions":
+        lines.extend([
+            "- final_measurement_source: reference ROI inner rectangles\n",
+            "- final_measurement_method: direct RGB measurement inside roi_inner_* rectangles\n",
+            "- final_blue_formula: B > blue_min, B > R + blue_over_red, and B > G + blue_over_green\n",
+        ])
+        if removed_candidate_warning:
+            lines.append("- candidate_stage_note: macro-stage WARN_SELECTED_OBJECTS_NEAR_FULL_BLUE was removed from the final-selection report because the final selection unit is reference ROI regions.\n")
+
+    lines.extend([
+        "\n## Final outputs to review\n\n",
+        f"- reference_roi_regions_overlay_{image_stem}.jpg\n",
+        f"- selected_objects_overlay_{image_stem}.jpg\n",
+        f"- selected_objects_contact_sheet_{image_stem}.jpg\n",
+        f"- reference_roi_regions_{image_stem}.csv\n",
+        f"- frame_features_{image_stem}.csv\n",
+        "\n## Diagnostic outputs, not final selection\n\n",
+        f"- roi_proposals_overlay_{image_stem}.jpg\n",
+        f"- roi_proposals_{image_stem}.csv\n",
+        f"- cellmask_{image_stem}.tif\n",
+        f"- blue_inside_cells_{image_stem}.tif\n",
+        f"- selection_review_candidates_{image_stem}.csv\n",
+        f"- review_candidates_contact_sheet_{image_stem}.jpg\n",
+    ])
+    if selection_unit_type == "reference_roi_regions":
+        lines.append("\nThese diagnostic/fallback/Weka-stage outputs are useful for QC, but they are not the final selected ROI result when selection_unit_type = reference_roi_regions. Use the final reference ROI outputs above for interpretation.\n")
+    else:
+        lines.append("\nThese outputs support QC of candidate selection and fallback behavior; check selection_unit_type before interpreting any overlay as final.\n")
+
+    lines.extend([
+        "\n## Auto ROI proposal review\n\n",
+        f"- auto_roi_proposal_count: {len(proposals)}\n",
+        f"- selected_objects_constrained_to_auto_roi: {'true' if proposals and selection_unit_type != 'reference_roi_regions' else 'false'}\n",
+        f"- primary_auto_roi_id: {proposals[0].get('roi_id', '') if proposals else ''}\n",
+        f"- primary_auto_roi_reason: {proposals[0].get('roi_review_note', '') if proposals else ''}\n",
+        "- selected overlay/contact sheet are regenerated from the final postprocessed selected_for_frame_summary flags.\n",
+    ])
+    large_seed_count = sum(1 for proposal in proposals if proposal.get("roi_review_note") == "roi_seed_large_aggregate_candidate")
+    lines.append(f"- large_aggregate_roi_seed_proposal_count: {large_seed_count}\n")
+    lines.append("- near-full-blue candidate selection caps are diagnostic unless final selection_unit_type uses object/auto ROI candidates.\n")
+    if not proposals:
+        lines.append("- WARN_NO_AUTO_ROI_PROPOSALS: no deterministic accepted-candidate clusters met ROI proposal criteria; frame-summary selection used full-frame fallback if no reference ROIs were accepted.\n")
+    if "WARN_SELECTED_OUTSIDE_AUTO_ROI" in qc_status and selection_unit_type != "reference_roi_regions":
+        lines.append("- WARN_SELECTED_OUTSIDE_AUTO_ROI: one or more selected objects were not inside an auto ROI proposal.\n")
+    lines.append("- Black rectangular boxes, when present and validated, define the final reference ROI regions; auto ROI proposals remain diagnostic/fallback in that mode.\n")
     with report_path.open("a", encoding="utf-8") as f:
         f.writelines(lines)
 
@@ -1867,7 +1910,7 @@ def postprocess_outputs(output: Path, image_stem: str, original_image: Path, par
     copy_final_named_outputs(output, image_stem)
     normalize_public_outputs_metadata(output, image_stem, original_image, short_path_used)
     proposals, qc_status = apply_auto_roi_selection(output, image_stem, original_image, params)
-    append_auto_roi_qc_report(output, proposals, qc_status)
+    append_auto_roi_qc_report(output, image_stem, proposals, qc_status)
     write_selection_review_candidates(output, image_stem)
     if bool_param(params.get("save_overlays", "true")):
         write_selected_objects_overlay(output, image_stem, original_image)
@@ -1885,6 +1928,24 @@ def append_runner_parameters_to_macro_log(output: Path, params: dict[str, str]) 
         for key, value in params.items():
             f.write(f"{key}={value}\n")
 
+
+
+def read_final_selection_summary(output: Path, image_stem: str) -> dict[str, str]:
+    summary_path = output / f"frame_features_{image_stem}.csv"
+    if not summary_path.exists():
+        return {
+            "final_selection_unit_type": "",
+            "final_selected_reference_roi_count": "",
+            "final_selected_reference_roi_blue_pixel_percent": "",
+        }
+    with summary_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    row = rows[0] if rows else {}
+    return {
+        "final_selection_unit_type": row.get("selection_unit_type", ""),
+        "final_selected_reference_roi_count": row.get("selected_reference_roi_count", ""),
+        "final_selected_reference_roi_blue_pixel_percent": row.get("selected_reference_roi_blue_pixel_percent", ""),
+    }
 
 def read_last_checkpoint(output: Path) -> str:
     log_path = output / "macro_log.txt"
@@ -2003,6 +2064,9 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
             "last_checkpoint": "",
             "timed_out": "False",
             "postprocess_error": "FAIL_WEKA_MODEL_MISSING",
+            "final_selection_unit_type": "",
+            "final_selected_reference_roi_count": "",
+            "final_selected_reference_roi_blue_pixel_percent": "",
             "ok": "False",
         }
     macro_params = params if weka_model is None else {**params, "weka_model": str(weka_model)}
@@ -2058,6 +2122,7 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
         missing, stale, empty = validate_named_outputs(output, final_expected_outputs(params, image.stem), started)
 
     last_checkpoint = read_last_checkpoint(output)
+    final_selection = read_final_selection_summary(output, image.stem)
     ok = returncode == 0 and not missing and not stale and not empty and not postprocess_error
     return {
         "project": str(project),
@@ -2076,6 +2141,9 @@ def run_fiji(project: Path, image: Path, output: Path, fiji: Path, macro: Path, 
         "last_checkpoint": last_checkpoint,
         "timed_out": str(timed_out),
         "postprocess_error": postprocess_error,
+        "final_selection_unit_type": final_selection.get("final_selection_unit_type", ""),
+        "final_selected_reference_roi_count": final_selection.get("final_selected_reference_roi_count", ""),
+        "final_selected_reference_roi_blue_pixel_percent": final_selection.get("final_selected_reference_roi_blue_pixel_percent", ""),
         "ok": str(ok),
     }
 
@@ -2131,6 +2199,15 @@ def main() -> int:
         writer.writerow(row)
 
     print(f"ok={row['ok']} returncode={row['returncode']} output={output}")
+    print(
+        "final_selection_unit_type={unit} final_selected_reference_roi_count={count} "
+        "final_selected_reference_roi_blue_pixel_percent={percent} output={output}".format(
+            unit=row.get("final_selection_unit_type", ""),
+            count=row.get("final_selected_reference_roi_count", ""),
+            percent=row.get("final_selected_reference_roi_blue_pixel_percent", ""),
+            output=output,
+        )
+    )
     if row["missing_outputs"]:
         print(f"missing={row['missing_outputs']}")
     if row["stale_outputs"]:
