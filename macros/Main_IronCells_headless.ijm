@@ -375,9 +375,11 @@ for (i = 0; i < nObjects; i++) {
     featureRowId = frameId + "_object_" + objectId;
     area = areas[i];
     aspect = maxOf(bws[i], bhs[i]) / maxOf(1, minOf(bws[i], bhs[i]));
-    touchesBorder = objectTouchesBorder(bxs[i], bys[i], bws[i], bhs[i]);
+    touchesFrameBorder = objectTouchesBorder(bxs[i], bys[i], bws[i], bhs[i]);
+    touchesAnalysisBorder = touchesFrameBorder;
+    if (referenceRoiOnly == 1 || referenceRoiCount > 0) touchesAnalysisBorder = 0;
     fillRatio = area / maxOf(1, bws[i] * bhs[i]);
-    classification = classifyObject(area, aspect, touchesBorder, fillRatio);
+    classification = classifyObject(area, aspect, touchesAnalysisBorder, fillRatio);
     rejectReason = rejectReasonFor(classification, area);
     accepted = isAcceptedClass(classification);
 
@@ -399,7 +401,7 @@ for (i = 0; i < nObjects; i++) {
     if (classification == "rectangle_or_line_artifact") tooLongCount++;
     if (classification == "border_object") borderCount++;
 
-    File.append((i+1) + "," + d2s(area,0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "\n", allCsv);
+    File.append((i+1) + "," + d2s(area,0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(aspect,4) + "," + boolText(touchesFrameBorder) + "," + classification + "," + boolText(accepted) + "," + rejectReason + "\n", allCsv);
 
     roiStatus = "not_attempted"; roiArea = 0; roiDelta = 100; selectionPenaltyFullBlue = 0; warnFullBlueCandidate = 0; selectionReviewNote = ""; meanR = 0; meanG = 0; meanB = 0; stdR = 0; stdG = 0; stdB = 0; minR = 0; minG = 0; minB = 0; maxR = 0; maxG = 0; maxB = 0; grayMean = 0; grayStd = 0; grayMin = 0; grayMax = 0; objectPixels = 0; bluePixels = 0; roiAreaPixels = round(bws[i]) * round(bhs[i]);
     selectWindow(cellMaskTitle);
@@ -435,7 +437,7 @@ for (i = 0; i < nObjects; i++) {
 
     if (objectPixels > 0) fraction = bluePixels / objectPixels; else fraction = 0;
     if (accepted == 1) {
-        postRejectReason = postFilterRejectReason(objectPixels, roiAreaPixels, bws[i], bhs[i], aspect, fillRatio, touchesBorder, fraction);
+        postRejectReason = postFilterRejectReason(objectPixels, roiAreaPixels, bws[i], bhs[i], aspect, fillRatio, touchesAnalysisBorder, fraction);
         if (postRejectReason != "") {
             accepted = 0;
             classification = postRejectReason;
@@ -491,7 +493,7 @@ for (i = 0; i < nObjects; i++) {
             }
         }
     } else {
-        File.append(originalFileName + "," + groupName + "," + frameId + "," + objectId + "," + featureRowId + ",weka_candidate,rejected,false," + classification + "," + rejectReason + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + boolText(touchesBorder) + "," + roiStatus + "\n", rejectedCsv);
+        File.append(originalFileName + "," + groupName + "," + frameId + "," + objectId + "," + featureRowId + ",weka_candidate,rejected,false," + classification + "," + rejectReason + "," + d2s(area,2) + "," + d2s(bxs[i],0) + "," + d2s(bys[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(bws[i],0) + "," + d2s(bhs[i],0) + "," + d2s(xs[i],2) + "," + d2s(ys[i],2) + "," + d2s(aspect,4) + "," + boolText(touchesFrameBorder) + "," + roiStatus + "\n", rejectedCsv);
     }
 
     if (saveOverlays == 1) {
